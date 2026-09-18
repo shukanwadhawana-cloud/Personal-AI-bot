@@ -138,14 +138,20 @@ jobs:
           git config user.email "bot@users.noreply.github.com"
 
           BRANCH="agent/$TASK_ID"
+          git fetch origin "$BRANCH" 2>/dev/null || true
           if git show-ref --verify --quiet "refs/remotes/origin/$BRANCH"; then
-            echo "Remote branch $BRANCH already exists; refusing to overwrite it."
-            exit 1
+            echo "Remote branch $BRANCH already exists; checking it out for a safe retry."
+            git checkout -B "$BRANCH" "origin/$BRANCH"
+          else
+            git checkout -b "$BRANCH"
           fi
-          git checkout -b "$BRANCH"
 
           if [ -z "${OPENAI_API_KEY:-}" ]; then
             echo "LLM_API_KEY is missing; cannot execute the coding agent."
+            exit 1
+          fi
+          if [ -z "${OPENAI_API_BASE:-}" ]; then
+            echo "LLM_BASE_URL is missing; cannot execute the coding agent."
             exit 1
           fi
           if [ -z "${AIDER_MODEL:-}" ]; then
@@ -153,7 +159,9 @@ jobs:
             exit 1
           fi
 
-          printf '%s' "$TASK_PROMPT" | aider             --yes             --no-git             --model "$AIDER_MODEL"             --message-file /dev/stdin
+          echo "LLM provider: Google Gemini OpenAI-compatible endpoint"
+          echo "LLM model: $AIDER_MODEL"
+          printf '%s' "$TASK_PROMPT" | aider --yes --no-git --model "$AIDER_MODEL" --message-file /dev/stdin
 
           git add -A
           if git diff --cached --quiet; then
@@ -216,8 +224,12 @@ jobs:
           report '{"step":{"name":"Validate inputs and authentication","status":"COMPLETED","detail":"Task inputs and GitHub access were validated."}}'
           report '{"step":{"name":"Checkout target repository","status":"COMPLETED","detail":"Requested repository and base branch were checked out."}}'
           report '{"step":{"name":"Install agent tooling","status":"COMPLETED","detail":"Python, aider-chat, and jq were installed and verified."}}'
-          report '{"step":{"name":"Execute coding agent","status":"COMPLETED","detail":"The coding agent completed its requested operation."}}'
-          if [ "${{ steps.agent.outputs.has_changes }}" = "true" ]; then
+          if [ "${{ steps.agent.outcome }}" = "success" ]; then
+            report '{"step":{"name":"Execute coding agent","status":"COMPLETED","detail":"The coding agent completed its requested operation."}}'
+          else
+            report '{"step":{"name":"Execute coding agent","status":"FAILED","detail":"The coding agent failed. See the GitHub Actions run for the exact failure."}}'
+          fi
+          if [ "${{ steps.agent.outcome }}" = "success" ] && [ "${{ steps.agent.outputs.has_changes }}" = "true" ]; then
             report '{"step":{"name":"Commit and push changes","status":"COMPLETED","detail":"Agent changes were committed and pushed."}}'
             if [ -n "${{ steps.pr.outputs.pull-request-url }}" ]; then
               report '{"step":{"name":"Create Pull Request","status":"COMPLETED","detail":"Pull request created or reused."}}'
