@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { createTask, getTask, listTasks, updateTask } from '@/lib/tasks';
+import { createTask, getTask, getTaskWorkerLease, listTasks, updateTask } from '@/lib/tasks';
 import { requireUser } from '@/lib/auth';
 import { z } from 'zod';
 import { getToken } from 'next-auth/jwt';
@@ -68,6 +68,9 @@ export async function POST(req: NextRequest) {
       (sessionToken as any)?.githubAccessToken;
 
     const callbackUrl = `${req.nextUrl.origin}/api/tasks/${task.id}`;
+    // Read the lease directly from persistence so workflow dispatch never depends
+    // on the internal Task object shape/serialization for the callback credential.
+    const callbackToken = await getTaskWorkerLease(task.id);
 
     if (!token) {
       await updateTask(
@@ -97,7 +100,7 @@ export async function POST(req: NextRequest) {
               target_branch: branch,
               prompt,
               callback_url: callbackUrl,
-              callback_token: task.workerLease,
+              callback_token: callbackToken,
             },
           }),
         });
