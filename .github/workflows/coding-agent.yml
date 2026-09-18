@@ -1,0 +1,99 @@
+name: Coding Agent Task
+
+on:
+  workflow_dispatch:
+    inputs:
+      task_id:
+        description: 'Task ID from control plane'
+        required: true
+      target_repo:
+        description: 'owner/repo to work on'
+        required: true
+      target_branch:
+        description: 'Base branch'
+        required: false
+        default: 'main'
+      prompt:
+        description: 'Natural language coding instruction'
+        required: true
+      callback_url:
+        description: 'Optional webhook to report result'
+        required: false
+
+jobs:
+  run-agent:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+
+    steps:
+      - name: Checkout target repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.inputs.target_repo }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          path: workspace
+          ref: ${{ github.event.inputs.target_branch }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install lightweight agent tools
+        run: |
+          pip install aider-chat openai
+          # Future: add openhands-sdk or cline if compatible with free minutes
+
+      - name: Run coding agent (placeholder loop)
+        id: agent
+        env:
+          OPENAI_API_KEY: ${{ secrets.LLM_API_KEY }}
+          # Map free providers via OpenAI-compatible endpoints if needed
+        working-directory: workspace
+        run: |
+          set -e
+          echo "Task ID: ${{ github.event.inputs.task_id }}"
+          echo "Prompt: ${{ github.event.inputs.prompt }}"
+          # Minimal safe agent loop using aider (or replace with OpenHands CLI later)
+          # For true autonomy replace this step with a full OpenHands / Cline invocation.
+          cat > /tmp/task.md << 'EOF'
+          ${{ github.event.inputs.prompt }}
+          EOF
+          # Example: aider --yes --message "$(cat /tmp/task.md)" || true
+          echo "Agent execution placeholder completed. Replace with full agent."
+          # Create a dummy improvement for demonstration
+          echo "# Agent run $(date -u)" >> AGENT_RUN.md || true
+          git config user.name "Personal-AI-Bot"
+          git config user.email "bot@users.noreply.github.com"
+          git checkout -b agent-task-${{ github.event.inputs.task_id }} || true
+          git add -A
+          git commit -m "chore(agent): ${{ github.event.inputs.task_id }} — automated improvement" || true
+          git push -u origin HEAD || true
+
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          path: workspace
+          branch: agent-task-${{ github.event.inputs.task_id }}
+          title: "[Agent] ${{ github.event.inputs.task_id }}"
+          body: |
+            Automated coding task from Personal AI Bot.
+
+            **Prompt:** ${{ github.event.inputs.prompt }}
+
+            Task ID: ${{ github.event.inputs.task_id }}
+          draft: false
+
+      - name: Report result (optional callback)
+        if: always()
+        run: |
+          if [ -n "${{ github.event.inputs.callback_url }}" ]; then
+            curl -X POST "${{ github.event.inputs.callback_url }}" \
+              -H "Content-Type: application/json" \
+              -d '{"task_id":"${{ github.event.inputs.task_id }}","status":"completed","run_id":"${{ github.run_id }}"}' || true
+          fi
