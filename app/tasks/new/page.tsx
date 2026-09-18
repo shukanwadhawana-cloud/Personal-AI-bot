@@ -1,8 +1,10 @@
 'use client';
 
 import { useState } from 'react';
+import { useRouter } from 'next/navigation';
 
 export default function NewTaskPage() {
+  const router = useRouter();
   const [repo, setRepo] = useState('');
   const [branch, setBranch] = useState('main');
   const [prompt, setPrompt] = useState('');
@@ -20,9 +22,16 @@ export default function NewTaskPage() {
         body: JSON.stringify({ repository: repo, branch, prompt }),
       });
       const data = await res.json();
+      if (res.status === 401) {
+        setStatus('error');
+        setMessage('Please sign in with GitHub first.');
+        return;
+      }
       if (!res.ok) throw new Error(data.error || 'Failed');
       setStatus('done');
-      setMessage(`Task ${data.id} queued. You can lock your phone — it will continue on GitHub Actions.`);
+      setMessage(`Task ${data.id} queued. Redirecting…`);
+      // Navigate to the persistent task page so the user can lock the phone
+      setTimeout(() => router.push(`/tasks/${data.id}`), 800);
     } catch (err: any) {
       setStatus('error');
       setMessage(err.message || 'Error');

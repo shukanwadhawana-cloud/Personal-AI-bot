@@ -1,0 +1,224 @@
+'use client';
+
+import { useEffect, useState } from 'react';
+import { useParams } from 'next/navigation';
+
+type Task = {
+  id: string;
+  repository: string;
+  title?: string;
+  prompt: string;
+  status: string;
+  branch: string;
+  createdAt: string;
+  startedAt?: string;
+  completedAt?: string;
+  updatedAt: string;
+  commitSha?: string;
+  prUrl?: string;
+  deploymentUrl?: string;
+  workerRunId?: string;
+  error?: string;
+  result?: string;
+};
+
+const STATUS_COLORS: Record<string, string> = {
+  QUEUED: '#666',
+  RUNNING: '#2563eb',
+  TESTING: '#7c3aed',
+  FIXING: '#c026d3',
+  COMMITTING: '#0891b2',
+  PUSHING: '#0d9488',
+  PR_CREATED: '#16a34a',
+  COMPLETED: '#16a34a',
+  FAILED: '#dc2626',
+  CANCELLED: '#9ca3af',
+};
+
+export default function TaskDetailPage() {
+  const params = useParams();
+  const id = params?.id as string;
+  const [task, setTask] = useState<Task | null>(null);
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    if (!id) return;
+    let cancelled = false;
+
+    async function load() {
+      try {
+        const res = await fetch(`/api/tasks/${id}`);
+        if (res.status === 401) {
+          setError('Please sign in');
+          setLoading(false);
+          return;
+        }
+        if (!res.ok) {
+          setError('Task not found');
+          setLoading(false);
+          return;
+        }
+        const data = await res.json();
+        if (!cancelled) {
+          setTask(data);
+          setLoading(false);
+        }
+      } catch {
+        if (!cancelled) {
+          setError('Failed to load');
+          setLoading(false);
+        }
+      }
+    }
+
+    load();
+    // Poll every 8 s while the task is not terminal
+    const interval = setInterval(() => {
+      if (task && ['COMPLETED', 'FAILED', 'CANCELLED', 'PR_CREATED'].includes(task.status)) {
+        return;
+      }
+      load();
+    }, 8000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [id, task?.status]);
+
+  if (loading) {
+    return (
+      <main style={pageStyle}>
+        <p>Loading task…</p>
+      </main>
+    );
+  }
+
+  if (error || !task) {
+    return (
+      <main style={pageStyle}>
+        <p style={{ color: 'crimson' }}>{error || 'Not found'}</p>
+        <a href="/">← Dashboard</a>
+      </main>
+    );
+  }
+
+  const color = STATUS_COLORS[task.status] || '#333';
+
+  return (
+    <main style={pageStyle}>
+      <h1 style={{ fontSize: '1.25rem', marginBottom: 4 }}>
+        {task.title || task.id.slice(0, 8)}
+      </h1>
+      <p style={{ color: '#666', fontSize: 14, marginBottom: 16 }}>
+        {task.repository} · {task.branch}
+      </p>
+
+      <div
+        style={{
+          display: 'inline-block',
+          padding: '6px 14px',
+          borderRadius: 999,
+          background: color,
+          color: '#fff',
+          fontWeight: 600,
+          fontSize: 14,
+          marginBottom: 20,
+        }}
+      >
+        {task.status}
+      </div>
+
+      <section style={sectionStyle}>
+        <h2 style={h2Style}>Prompt</h2>
+        <pre style={preStyle}>{task.prompt}</pre>
+      </section>
+
+      <section style={sectionStyle}>
+        <h2 style={h2Style}>Timeline</h2>
+        <ul style={{ listStyle: 'none', padding: 0, margin: 0, fontSize: 14 }}>
+          <li>Created: {new Date(task.createdAt).toLocaleString()}</li>
+          {task.startedAt && <li>Started: {new Date(task.startedAt).toLocaleString()}</li>}
+          {task.completedAt && <li>Completed: {new Date(task.completedAt).toLocaleString()}</li>}
+          <li>Updated: {new Date(task.updatedAt).toLocaleString()}</li>
+        </ul>
+      </section>
+
+      {(task.commitSha || task.prUrl || task.deploymentUrl || task.workerRunId) && (
+        <section style={sectionStyle}>
+          <h2 style={h2Style}>Results</h2>
+          <ul style={{ listStyle: 'none', padding: 0, margin: 0, fontSize: 14 }}>
+            {task.workerRunId && (
+              <li>
+                Worker run:{' '}
+                <a
+                  href={`https://github.com/${process.env.NEXT_PUBLIC_CONTROL_PLANE_REPO || 'shukanwadhawana-cloud/Personal-AI-bot'}/actions/runs/${task.workerRunId}`}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  {task.workerRunId}
+                </a>
+              </li>
+            )}
+            {task.commitSha && <li>Commit: <code>{task.commitSha.slice(0, 7)}</code></li>}
+            {task.prUrl && (
+              <li>
+                PR:{' '}
+                <a href={task.prUrl} target="_blank" rel="noreferrer">
+                  {task.prUrl}
+                </a>
+              </li>
+            )}
+            {task.deploymentUrl && (
+              <li>
+                Deployment:{' '}
+                <a href={task.deploymentUrl} target="_blank" rel="noreferrer">
+                  {task.deploymentUrl}
+                </a>
+              </li>
+            )}
+          </ul>
+        </section>
+      )}
+
+      {task.error && (
+        <section style={sectionStyle}>
+          <h2 style={{ ...h2Style, color: 'crimson' }}>Error</h2>
+          <pre style={{ ...preStyle, color: 'crimson' }}>{task.error}</pre>
+        </section>
+      )}
+
+      {task.result && (
+        <section style={sectionStyle}>
+          <h2 style={h2Style}>Summary</h2>
+          <pre style={preStyle}>{task.result}</pre>
+        </section>
+      )}
+
+      <p style={{ marginTop: 32 }}>
+        <a href="/">← Dashboard</a>
+        {' · '}
+        <a href="/tasks/new">New task</a>
+      </p>
+    </main>
+  );
+}
+
+const pageStyle: React.CSSProperties = {
+  fontFamily: 'system-ui',
+  padding: '1.5rem',
+  maxWidth: 640,
+  margin: '0 auto',
+};
+const sectionStyle: React.CSSProperties = { marginBottom: 24 };
+const h2Style: React.CSSProperties = { fontSize: 14, textTransform: 'uppercase', letterSpacing: 0.5, color: '#666', marginBottom: 8 };
+const preStyle: React.CSSProperties = {
+  whiteSpace: 'pre-wrap',
+  wordBreak: 'break-word',
+  background: '#f3f4f6',
+  padding: 12,
+  borderRadius: 8,
+  fontSize: 14,
+  margin: 0,
+};
