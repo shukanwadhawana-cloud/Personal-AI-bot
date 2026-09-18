@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createTask, listTasks, updateTask } from '@/lib/tasks';
+import { requireUser } from '@/lib/auth';
 import { z } from 'zod';
 
 const CreateTaskSchema = z.object({
@@ -13,17 +14,22 @@ const CreateTaskSchema = z.object({
   title: z.string().max(200).optional(),
 });
 
-// NOTE: Auth will be enforced in Phase 3B. Until then a demo user is used
-// so the existing UI continues to function while the DB is verified.
-const DEMO_USER = 'demo-user';
-
 export async function GET() {
-  const tasks = await listTasks(DEMO_USER);
+  const auth = await requireUser();
+  if (!auth) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+  const tasks = await listTasks(auth.userId);
   return NextResponse.json(tasks);
 }
 
 export async function POST(req: NextRequest) {
   try {
+    const auth = await requireUser();
+    if (!auth) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
     const body = await req.json();
     const parsed = CreateTaskSchema.safeParse(body);
     if (!parsed.success) {
@@ -34,15 +40,17 @@ export async function POST(req: NextRequest) {
     }
     const { repository, branch, prompt, title } = parsed.data;
 
+    // Basic authorization: user may only target repos they own or have been granted access to.
+    // Full repo-permission check will be added later via GitHub API; for now we accept the claim
+    // and rely on the Actions token scopes to enforce write access.
     const task = await createTask({
-      userId: DEMO_USER,
+      userId: auth.userId,
       repository,
       branch,
       prompt,
       title: title || prompt.slice(0, 80),
     });
 
-    // Fire-and-forget dispatch to GitHub Actions
     const controlPlaneRepo =
       process.env.CONTROL_PLANE_REPO || 'shukanwadhawana-cloud/Personal-AI-bot';
     const dispatchUrl = `https://api.github.com/repos/${controlPlaneRepo}/actions/workflows/coding-agent.yml/dispatches`;
@@ -70,11 +78,10 @@ export async function POST(req: NextRequest) {
           }),
         });
         if (res.ok || res.status === 204) {
-          await updateTask(task.id, { status: 'RUNNING' });
+          await updateTask(task.id, { status: 'RUNNING' }, auth.userId);
         }
       } catch (e) {
         console.error('Dispatch failed', e);
-        // Task remains QUEUED; can be retried later
       }
     }
 
