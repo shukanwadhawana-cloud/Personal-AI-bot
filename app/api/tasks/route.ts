@@ -52,10 +52,11 @@ export async function POST(req: NextRequest) {
 
     const controlPlaneRepo =
       process.env.CONTROL_PLANE_REPO || 'shukanwadhawana-cloud/Personal-AI-bot';
-    const dispatchUrl = `https://api.github.com/repos/${controlPlaneRepo}/actions/workflows/coding-agent.yml/dispatches`;
+    // Prefer the freshly registered workflow file name.
+    const workflowFile =
+      process.env.CODING_AGENT_WORKFLOW || 'coding-agent-task.yml';
+    const dispatchUrl = `https://api.github.com/repos/${controlPlaneRepo}/actions/workflows/${workflowFile}/dispatches`;
 
-    // Prefer an explicit server-side token when configured; otherwise use the
-    // GitHub OAuth token captured in the signed-in user's encrypted NextAuth JWT.
     const sessionToken = await getToken({
       req,
       secret: process.env.NEXTAUTH_SECRET,
@@ -66,7 +67,6 @@ export async function POST(req: NextRequest) {
       process.env.AGENT_GITHUB_TOKEN ||
       (sessionToken as any)?.githubAccessToken;
 
-    // Derive the callback from the request origin so CALLBACK_URL is optional.
     const callbackUrl = `${req.nextUrl.origin}/api/tasks/${task.id}`;
 
     if (!token) {
