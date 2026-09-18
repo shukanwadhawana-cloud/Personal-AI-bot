@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { createTask, getTask, listTasks, updateTask } from '@/lib/tasks';
 import { requireUser } from '@/lib/auth';
 import { z } from 'zod';
+import { getToken } from 'next-auth/jwt';
 
 const CreateTaskSchema = z.object({
   repository: z
@@ -38,6 +39,7 @@ export async function POST(req: NextRequest) {
         { status: 400 }
       );
     }
+
     const { repository, branch, prompt, title } = parsed.data;
 
     const task = await createTask({
@@ -51,15 +53,33 @@ export async function POST(req: NextRequest) {
     const controlPlaneRepo =
       process.env.CONTROL_PLANE_REPO || 'shukanwadhawana-cloud/Personal-AI-bot';
     const dispatchUrl = `https://api.github.com/repos/${controlPlaneRepo}/actions/workflows/coding-agent.yml/dispatches`;
-    const token = process.env.GITHUB_TOKEN || process.env.AGENT_GITHUB_TOKEN;
 
-    // Build the full callback URL that includes the task id
-    const baseCallback = process.env.CALLBACK_URL; // e.g. https://app.vercel.app/api/tasks
-    const callbackUrl = baseCallback
-      ? `${baseCallback.replace(/\/$/, '')}/${task.id}`
-      : '';
+    // Prefer an explicit server-side token when configured; otherwise use the
+    // GitHub OAuth token captured in the signed-in user's encrypted NextAuth JWT.
+    const sessionToken = await getToken({
+      req,
+      secret: process.env.NEXTAUTH_SECRET,
+      secureCookie: process.env.NODE_ENV === 'production',
+    });
+    const token =
+      process.env.GITHUB_TOKEN ||
+      process.env.AGENT_GITHUB_TOKEN ||
+      (sessionToken as any)?.githubAccessToken;
 
-    if (token) {
+    // Derive the callback from the request origin so CALLBACK_URL is optional.
+    const callbackUrl = `${req.nextUrl.origin}/api/tasks/${task.id}`;
+
+    if (!token) {
+      await updateTask(
+        task.id,
+        {
+          status: 'FAILED',
+          error:
+            'GitHub authorization is not available. Sign out and sign in with GitHub again to grant repository access, or configure GITHUB_TOKEN/AGENT_GITHUB_TOKEN.',
+        },
+        auth.userId
+      );
+    } else {
       try {
         const res = await fetch(dispatchUrl, {
           method: 'POST',
@@ -80,19 +100,37 @@ export async function POST(req: NextRequest) {
             },
           }),
         });
+
         if (res.ok || res.status === 204) {
           await updateTask(task.id, { status: 'RUNNING' }, auth.userId);
         } else {
           const text = await res.text().catch(() => '');
           console.error('Dispatch failed', res.status, text);
+          await updateTask(
+            task.id,
+            {
+              status: 'FAILED',
+              error: `GitHub Actions dispatch failed (${res.status}). ${text.slice(0, 1000)}`,
+            },
+            auth.userId
+          );
         }
-      } catch (e) {
+      } catch (e: any) {
         console.error('Dispatch failed', e);
+        await updateTask(
+          task.id,
+          {
+            status: 'FAILED',
+            error: `GitHub Actions dispatch error: ${e?.message || 'unknown error'}`,
+          },
+          auth.userId
+        );
       }
     }
 
+    const finalTask = await getTask(task.id, auth.userId);
     return NextResponse.json(
-      { id: task.id, status: task.status },
+      { id: task.id, status: finalTask?.status || task.status },
       { status: 201 }
     );
   } catch (e: any) {
