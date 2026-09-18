@@ -22,11 +22,11 @@ on:
         type: string
       callback_url:
         description: Full URL to PATCH (e.g. https://app/api/tasks/id)
-        required: false
+        required: true
         type: string
       callback_token:
         description: Per-task callback credential
-        required: false
+        required: true
         type: string
 
 permissions:
@@ -88,7 +88,7 @@ jobs:
           gh api "repos/${{ github.event.inputs.target_repo }}" --jq '.full_name + " (" + .default_branch + ")"'
 
       - name: Report RUNNING
-        if: ${{ github.event.inputs.callback_url != '' && github.event.inputs.callback_token != '' }}
+        if: ${{ always() }}
         env:
           CALLBACK_TOKEN: ${{ github.event.inputs.callback_token }}
           CALLBACK_URL: ${{ github.event.inputs.callback_url }}
@@ -202,7 +202,7 @@ jobs:
 
 
       - name: Record execution steps
-        if: always() && github.event.inputs.callback_url != '' && github.event.inputs.callback_token != ''
+        if: always()
         env:
           CALLBACK_TOKEN: ${{ github.event.inputs.callback_token }}
           CALLBACK_URL: ${{ github.event.inputs.callback_url }}
@@ -236,7 +236,7 @@ jobs:
           fi
 
       - name: Report success / failure
-        if: always() && github.event.inputs.callback_url != '' && github.event.inputs.callback_token != ''
+        if: always()
         env:
           CALLBACK_TOKEN: ${{ github.event.inputs.callback_token }}
           CALLBACK_URL: ${{ github.event.inputs.callback_url }}
