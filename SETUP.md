@@ -1,142 +1,227 @@
-# SETUP.md — Exact deployment sequence (₹0)
+# SETUP.md — Foolproof deployment (₹0)
 
-Follow these steps in order. Do not skip.
-
----
-
-## 1. Create Neon Free project (database)
-
-1. Go to https://console.neon.tech and sign up (no credit card required).
-2. Create a project (any name).
-3. Copy the **connection string** (starts with `postgresql://…`).
-4. Keep it for step 6 → this becomes `DATABASE_URL`.
+**Do not paste any secret into this repository or into chat.**  
+Generate secrets on your own machine and enter them only in Vercel / GitHub / Neon UIs.
 
 ---
 
-## 2. Create GitHub OAuth App (user login)
+## QUICK START FOR IPHONE
 
-1. https://github.com/settings/developers → **OAuth Apps** → **New OAuth App**.
-2. Application name: `Personal AI Bot` (or any name).
-3. Homepage URL: leave as `http://localhost:3000` for now; you will edit it after deploy.
-4. Authorization callback URL: `http://localhost:3000/api/auth/callback/github` (temporary).
-5. Register → copy **Client ID** and generate **Client Secret**.
-6. Keep them for step 6 → `GITHUB_ID` and `GITHUB_SECRET`.
-
----
-
-## 3. Generate NEXTAUTH_SECRET
-
-```bash
-openssl rand -base64 32
+```
+NEON
+  → GITHUB OAUTH APP
+  → GENERATE 2 SECRETS (local)
+  → CREATE FINE-GRAINED PAT (optional but recommended)
+  → VERCEL DEPLOY + ENV VARS
+  → GITHUB ACTIONS SECRETS
+  → UPDATE OAUTH CALLBACK + REDEPLOY
+  → FIRST TEST ON IPHONE
 ```
 
-Keep the output for step 6.
+Follow the numbered sections below in order.
 
 ---
 
-## 4. Generate WORKER_CALLBACK_SECRET
+## 1. Neon Free (database)
+
+| What | Where |
+|------|--------|
+| Account | https://console.neon.tech (sign up, no credit card) |
+| Action | Create a project → copy the **connection string** |
+| Becomes | `DATABASE_URL` |
+| Goes into | **Vercel → Environment Variables** only |
+
+Example format (do not use this value):  
+`postgresql://user:xxxxx@ep-xxxx.region.aws.neon.tech/neondb?sslmode=require`
+
+---
+
+## 2. GitHub OAuth App (login)
+
+1. Open https://github.com/settings/developers  
+2. **OAuth Apps** → **New OAuth App**
+3. Fill in:
+
+| Field | Value for first registration |
+|-------|------------------------------|
+| Application name | `Personal AI Bot` |
+| Homepage URL | `https://placeholder.vercel.app` (temporary) |
+| Authorization callback URL | `https://placeholder.vercel.app/api/auth/callback/github` (temporary) |
+
+4. Click **Register application**
+5. Copy **Client ID** → this is `GITHUB_ID`
+6. Click **Generate a new client secret** → copy once → this is `GITHUB_SECRET`  
+   (you cannot see it again)
+
+You will fix the real URLs in step 7 after Vercel gives you a domain.
+
+---
+
+## 3. Generate secrets on your machine
+
+Run these **locally** (Terminal / PowerShell). **Do not send the output anywhere.**
 
 ```bash
+# NEXTAUTH_SECRET (required)
+openssl rand -base64 32
+
+# WORKER_CALLBACK_SECRET (required — same value used in TWO places)
 openssl rand -base64 24
 ```
 
-You will put the **same value** in both Vercel and GitHub Actions secrets.
+If you do not have `openssl`, use any secure random generator of 32+ characters.  
+Keep both values in a password manager until you paste them into the UIs below.
 
 ---
 
-## 5. Deploy the control plane to Vercel Hobby
+## 4. Fine-grained PAT (recommended for dispatch)
 
-1. Go to https://vercel.com → **Add New… → Project**.
-2. Import `shukanwadhawana-cloud/Personal-AI-bot`.
-3. Framework preset: Next.js (auto-detected).
-4. **Do not deploy yet** — first add environment variables (next step).
+The control plane needs a token that can trigger GitHub Actions on this repo.
 
----
+1. https://github.com/settings/tokens?type=beta → **Generate new token**
+2. Token name: `personal-ai-bot-control`
+3. Expiration: 90 days (or your preference)
+4. Repository access: **Only select repositories** → choose `Personal-AI-bot` + any repos the agent may edit
+5. Permissions:
+   - **Actions**: Read and write
+   - **Contents**: Read and write
+   - **Pull requests**: Read and write
+6. Generate → copy once → this becomes `AGENT_GITHUB_TOKEN`
 
-## 6. Vercel environment variables (Production)
-
-In the Vercel project → **Settings → Environment Variables**, add for **Production**:
-
-| Name | Value |
-|------|-------|
-| `DATABASE_URL` | Neon connection string from step 1 |
-| `NEXTAUTH_SECRET` | from step 3 |
-| `NEXTAUTH_URL` | `https://<your-vercel-domain>` (you will know this after first deploy) |
-| `GITHUB_ID` | OAuth Client ID |
-| `GITHUB_SECRET` | OAuth Client Secret |
-| `GITHUB_TOKEN` or `AGENT_GITHUB_TOKEN` | Fine-grained PAT with `actions:write`, `contents:write`, `pull_requests:write` on this repo and any target repos |
-| `CALLBACK_URL` | `https://<your-vercel-domain>/api/tasks` (base only; task id is appended automatically) |
-| `WORKER_CALLBACK_SECRET` | from step 4 |
-| `CONTROL_PLANE_REPO` | `shukanwadhawana-cloud/Personal-AI-bot` (optional, already defaulted) |
-
-After the first deploy you will know the exact domain. Update `NEXTAUTH_URL` and `CALLBACK_URL` and also update the OAuth App homepage + callback URLs to:
-
-- Homepage: `https://<your-vercel-domain>`
-- Callback: `https://<your-vercel-domain>/api/auth/callback/github`
-
-Then redeploy.
+Goes into: **Vercel Environment Variables only** (never into Actions secrets for this purpose).
 
 ---
 
-## 7. GitHub Actions secrets (this repository)
+## 5. Free LLM key (for the worker)
 
-Repository → **Settings → Secrets and variables → Actions → New repository secret**:
+Pick one free provider and create an API key (do this yourself):
 
-| Name | Value |
-|------|-------|
-| `LLM_API_KEY` | Free provider key (Groq / Gemini / OpenRouter / …) |
-| `LLM_BASE_URL` | Optional, e.g. `https://api.groq.com/openai/v1` |
-| `LLM_MODEL` | Optional model name |
-| `WORKER_CALLBACK_SECRET` | **Same value** as in Vercel |
+- Groq: https://console.groq.com  
+- Google AI Studio (Gemini): https://aistudio.google.com  
+- OpenRouter free models: https://openrouter.ai  
 
-`GITHUB_TOKEN` is supplied automatically by Actions; you do not create it.
+The key becomes `LLM_API_KEY`.  
+Goes into: **GitHub Actions secrets only** (not Vercel).
 
----
-
-## 8. Fine-grained PAT for the control plane
-
-If the default Vercel `GITHUB_TOKEN` cannot dispatch workflows, create a fine-grained PAT:
-
-- Resource owner: your user
-- Repository access: this repo + any repos the agent should modify
-- Permissions: **Actions: Read and write**, **Contents: Read and write**, **Pull requests: Read and write**
-
-Store it as `AGENT_GITHUB_TOKEN` (or `GITHUB_TOKEN`) in Vercel.
+Optional companions:
+- `LLM_BASE_URL` — e.g. `https://api.groq.com/openai/v1`
+- `LLM_MODEL` — e.g. the model name your provider documents
 
 ---
 
-## 9. First real test (safe, small)
+## 6. Vercel deploy + environment variables
 
-1. Open the deployed URL on an iPhone.
-2. Sign in with GitHub.
-3. Create a task against a repository you own with a **deliberately small prompt**, for example:
+1. https://vercel.com → **Add New… → Project**
+2. Import `shukanwadhawana-cloud/Personal-AI-bot`
+3. Framework: Next.js (auto)
+4. **Before the first deploy**, open **Environment Variables** and add for **Production**:
 
-   > Add a short section to the README titled “Architecture overview” that describes the control-plane + GitHub Actions design in 3–5 sentences. Do not modify any application source code.
+| Variable | Value source | Required |
+|----------|--------------|----------|
+| `DATABASE_URL` | Neon connection string (step 1) | Yes |
+| `NEXTAUTH_SECRET` | generated in step 3 | Yes |
+| `NEXTAUTH_URL` | leave blank for first deploy, or set after you know the domain | Yes (after domain known) |
+| `GITHUB_ID` | OAuth Client ID (step 2) | Yes |
+| `GITHUB_SECRET` | OAuth Client Secret (step 2) | Yes |
+| `AGENT_GITHUB_TOKEN` | fine-grained PAT (step 4) | Yes for dispatch |
+| `CALLBACK_URL` | `https://YOUR-DOMAIN.vercel.app/api/tasks` (after domain known) | Recommended |
+| `WORKER_CALLBACK_SECRET` | generated in step 3 | Yes |
+| `CONTROL_PLANE_REPO` | `shukanwadhawana-cloud/Personal-AI-bot` | Optional (has default) |
 
-4. Confirm you are redirected to `/tasks/<id>` and status becomes QUEUED then RUNNING.
-5. Lock the iPhone / close Safari.
-6. Wait 2–10 minutes (depending on free LLM latency).
-7. Reopen the app → the same task must still exist and status should have progressed.
-8. On GitHub verify: branch `agent/<task-id>`, commit, and open PR.
+5. Click **Deploy**.
+6. After deploy succeeds, copy the production URL (e.g. `https://personal-ai-bot-xxxx.vercel.app`).
 
 ---
 
-## 10. Local development (optional)
+## 7. Fix OAuth + NEXTAUTH_URL + CALLBACK_URL, then redeploy
+
+### A. GitHub OAuth App
+
+Edit the OAuth App you created:
+
+| Field | New value |
+|-------|-----------|
+| Homepage URL | `https://YOUR-DOMAIN.vercel.app` |
+| Authorization callback URL | `https://YOUR-DOMAIN.vercel.app/api/auth/callback/github` |
+
+### B. Vercel environment variables
+
+Update / set:
+
+| Variable | Value |
+|----------|-------|
+| `NEXTAUTH_URL` | `https://YOUR-DOMAIN.vercel.app` |
+| `CALLBACK_URL` | `https://YOUR-DOMAIN.vercel.app/api/tasks` |
+
+(No trailing slash on the domain.)
+
+### C. Redeploy
+
+Vercel → Deployments → … on the latest → **Redeploy** (so the new env vars take effect).
+
+---
+
+## 8. GitHub Actions secrets
+
+Repository → **Settings → Secrets and variables → Actions → New repository secret**
+
+| Name | Value source | Required |
+|------|--------------|----------|
+| `LLM_API_KEY` | free provider key (step 5) | Yes for real agent work |
+| `LLM_BASE_URL` | optional provider base URL | Optional |
+| `LLM_MODEL` | optional model name | Optional |
+| `WORKER_CALLBACK_SECRET` | **same value** as in Vercel (step 3) | Yes |
+
+Do **not** put `DATABASE_URL`, `GITHUB_SECRET`, or `NEXTAUTH_SECRET` here.
+
+`GITHUB_TOKEN` is supplied automatically by Actions — you do not create it.
+
+---
+
+## 9. First test on iPhone
+
+1. Open `https://YOUR-DOMAIN.vercel.app` in Safari on your iPhone.
+2. Tap **Sign in with GitHub** and authorize.
+3. Tap **+ New Coding Task**.
+4. Repository: a repo **you own** (format `owner/name`).
+5. Branch: `main` (or your default).
+6. Prompt (copy exactly for the first run):
+
+```
+Add a short section to the README titled "Architecture overview" that describes the control-plane plus GitHub Actions design in 3 to 5 sentences. Do not modify any application source code.
+```
+
+7. Tap **START**. You should land on `/tasks/<id>` with status QUEUED then RUNNING.
+8. Lock the phone / leave Safari.
+9. Wait 3–15 minutes.
+10. Reopen the site → the same task must still be there and status should have moved (PR_CREATED / COMPLETED / FAILED).
+11. On GitHub check for branch `agent/<task-id>` and an open PR.
+
+---
+
+## Where each value lives (summary)
+
+| Value | Create in | Enter in |
+|-------|-----------|----------|
+| Neon connection string | Neon console | Vercel env → `DATABASE_URL` |
+| OAuth Client ID | GitHub OAuth App | Vercel env → `GITHUB_ID` |
+| OAuth Client Secret | GitHub OAuth App | Vercel env → `GITHUB_SECRET` |
+| NEXTAUTH_SECRET | local `openssl` | Vercel env |
+| WORKER_CALLBACK_SECRET | local `openssl` | **Both** Vercel env **and** Actions secrets |
+| AGENT_GITHUB_TOKEN | GitHub fine-grained PAT | Vercel env |
+| LLM_API_KEY (+ optional BASE/MODEL) | LLM provider | **Actions secrets only** |
+| NEXTAUTH_URL / CALLBACK_URL | after Vercel domain known | Vercel env |
+| OAuth Homepage + Callback URLs | after Vercel domain known | GitHub OAuth App settings |
+
+---
+
+## Local development (optional)
 
 ```bash
+git clone https://github.com/shukanwadhawana-cloud/Personal-AI-bot.git
+cd Personal-AI-bot
 npm install
-# Without DATABASE_URL the in-memory store is used (development only).
-# In production DATABASE_URL is mandatory.
 npm run dev
 ```
 
----
-
-## Distinction that matters
-
-| Location | Variables |
-|----------|-----------|
-| **Vercel (control plane)** | DATABASE_URL, NEXTAUTH_*, GITHUB_ID/SECRET, AGENT_GITHUB_TOKEN, CALLBACK_URL, WORKER_CALLBACK_SECRET |
-| **GitHub Actions secrets** | LLM_API_KEY, LLM_BASE_URL, LLM_MODEL, WORKER_CALLBACK_SECRET |
-
-Never put the LLM key in Vercel unless you also need it for something else. Never put the Neon URL in Actions secrets.
+Without `DATABASE_URL` the app uses an in-memory store (development only). Production always requires Neon.
