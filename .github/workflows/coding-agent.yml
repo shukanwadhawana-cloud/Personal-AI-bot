@@ -161,7 +161,12 @@ jobs:
 
           echo "LLM provider: Google Gemini OpenAI-compatible endpoint"
           echo "LLM model: $AIDER_MODEL"
-          printf '%s' "$TASK_PROMPT" | aider --yes --no-git --model "$AIDER_MODEL" --message-file /dev/stdin
+          MODEL="$AIDER_MODEL"
+          if [[ "$MODEL" != */* ]]; then
+            MODEL="openai/$MODEL"
+          fi
+          echo "Aider model route: $MODEL"
+          printf '%s' "$TASK_PROMPT" | aider --yes --no-git --model "$MODEL" --message-file /dev/stdin
 
           git add -A
           if git diff --cached --quiet; then
