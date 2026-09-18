@@ -1,20 +1,21 @@
 # STORAGE.md
 
-## Policy
+## Policy (enforced)
 
-- **Never** permanently store full Git repositories, node_modules, build artifacts, Docker images, screenshots, or large logs.
-- Database holds only compact metadata: users, tasks, status, timestamps, commit SHA, PR URL, short summaries, error messages.
+- Database (Neon Free) stores **only** task metadata (id, user, repo name, prompt, status, SHAs, URLs, timestamps, short error/result).
+- Full repositories, `node_modules`, build artefacts, screenshots, videos, model weights are **never** written to the database or object storage.
+- Worker workspace is deleted at the end of every Actions job.
 
-## Retention Defaults
+## Retention
 
 | Data | Retention |
 |------|-----------|
-| Verbose logs | 3 days |
-| Task events | 7 days |
-| Completed task summaries | 30 days |
-| Temporary workspace | Deleted at end of Actions job |
-| Repositories | Only on GitHub |
+| Verbose logs (Actions) | GitHub default (90 days) |
+| Task events / metadata | Soft cleanup after 30 days (`cleanupOldTasks`) |
+| Temporary workspace | Immediate |
 
 ## Resource Guard
 
-The control plane should expose a simple resource-usage page (DB size estimate, task count, recent log volume). Old records are cleaned by a scheduled workflow or on-read soft-delete.
+- Neon Free: 0.5 GB storage (more than enough for metadata).
+- Index on `(user_id, status)` and `updated_at` keeps queries cheap.
+- `cleanupOldTasks(days)` can be called from a scheduled workflow later.

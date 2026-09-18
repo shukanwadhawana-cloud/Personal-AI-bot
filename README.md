@@ -1,57 +1,50 @@
 # Personal AI Bot — Persistent Cloud Coding Agent
 
-> Evolve into a mobile-controllable, always-continuing coding agent (OpenHands-style) that survives phone lock, browser close, and network loss. Target cost: **₹0/month**.
+> Mobile-controllable coding agent that continues after you lock your iPhone. Target cost: **₹0/month**.
 
-## Foundation Chosen (Phase 1)
+## Current status (Phase 3)
 
-**PRIMARY:** OpenHands concepts + Software Agent SDK patterns + GitHub Actions as the free, isolated, long-running execution sandbox.
+| Component | Status |
+|-----------|--------|
+| Control plane (Next.js) | Implemented |
+| Persistent DB (Neon Free) | Implemented |
+| GitHub OAuth | Implemented |
+| Task detail + polling | Implemented |
+| GitHub Actions worker | Hardened |
+| Live deployment | Ready — needs your secrets + Vercel connect |
+| Real iPhone E2E | Pending deployment |
 
-**Architecture (simplified):**
+## Architecture
 
 ```
 iPhone / iPad (PWA)
       ↓
-Thin Control Plane (this repo — Next.js / API)
+Next.js control plane (Vercel Hobby)
       ↓
-Persistent Task State (free DB)
+Neon Free (task metadata only)
       ↓
-GitHub Actions workflow_dispatch / repository_dispatch
+GitHub Actions workflow_dispatch
       ↓
-Ephemeral runner + coding agent (OpenHands-compatible loop / Aider / Cline headless)
+Ephemeral runner + Aider (OpenHands/Cline later)
       ↓
-Clone target repo → observe → plan → edit → test → fix → branch → commit → PR
+clone → edit → test → branch → commit → PR → cleanup
       ↓
-Result + status written back → notification
+status written back to Neon → visible on /tasks/[id]
 ```
 
-The phone never keeps the task alive. The cloud (Actions) does.
+## Quick start
 
-## Status
-
-- Phase 0 (Audit): Complete
-- Phase 1 (Foundation): Chosen — OpenHands-inspired agent loop + GitHub Actions execution + thin control plane
-- Phase 2 (Implement): In progress in this repository
-- Phase 3 (E2E test): Pending after core wiring
-
-## Quick Start (after secrets are set)
-
-1. Fork / use this repo.
-2. Add secrets: `LLM_API_KEY` (Groq / Gemini / OpenRouter free), optional `OPENHANDS` tokens if using full SDK.
-3. Deploy control plane to Vercel Hobby (or Cloudflare).
-4. From the mobile UI: select a target repository you own, enter a prompt, start task.
-5. Lock phone → task continues on Actions → reopen to see status / PR link.
+See **SETUP.md** for the exact environment variables and deployment steps.
 
 ## Documentation
 
-- CURRENT-ARCHITECTURE.md
-- OPEN-SOURCE-AUDIT.md
-- LICENSE-AUDIT.md
-- FREE-INFRASTRUCTURE-AUDIT.md
-- REQUIRED-ACCOUNTS.md
-- SETUP.md (to be expanded)
-- SECURITY.md (to be expanded)
-- STORAGE.md (to be expanded)
+- SETUP.md
+- SECURITY.md
+- STORAGE.md
+- PHASE-3-IMPLEMENTATION-REPORT.md
+- FINAL-REPORT.md
+- OPEN-SOURCE-AUDIT.md / LICENSE-AUDIT.md / FREE-INFRASTRUCTURE-AUDIT.md / REQUIRED-ACCOUNTS.md
 
 ## License
 
-MIT (this control plane). Upstream agents retain their own licenses (MIT / Apache-2.0).
+MIT (control plane). Upstream agents keep their own licenses.

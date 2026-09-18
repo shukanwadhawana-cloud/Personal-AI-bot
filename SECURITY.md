@@ -2,22 +2,22 @@
 
 ## Threat Model
 
-Every target repository is treated as untrusted. Agent runs only inside GitHub Actions runners (ephemeral, isolated).
+Target repositories are untrusted. All agent execution happens inside ephemeral GitHub Actions runners.
 
-## Protections Implemented / Required
+## Implemented Protections
 
-- GitHub tokens and LLM keys live only in Actions secrets and server-side env.
-- Never logged in plain text.
-- Frontend never receives secrets.
-- Task ownership: only the authenticated GitHub user who created the task can view/cancel it.
-- CSRF protection on state-changing API routes (NextAuth + same-site cookies).
-- Rate limiting on task creation (to be enforced in control plane).
-- Agent workflow uses least-privilege permissions (`contents: write`, `pull-requests: write`).
-- Temporary workspace is destroyed when the job ends.
-- No permanent storage of full repositories or node_modules.
+- **Authentication**: NextAuth + GitHub OAuth. Unauthenticated requests to `/api/tasks` return 401.
+- **Authorization**: Tasks are scoped by `user_id`. `getTask` / `listTasks` / `updateTask` filter by the authenticated user. Worker updates require `x-worker-secret`.
+- **Input validation**: Zod schema rejects malformed `owner/repo`, oversized prompts, etc.
+- **Secrets**: LLM keys, GitHub tokens, DB credentials, OAuth secrets and worker callback secret live only in environment / Actions secrets. Never sent to the browser or to repository code.
+- **CSRF**: NextAuth cookies are `SameSite` + secure in production.
+- **Least privilege on Actions**: `contents: write`, `pull-requests: write` only.
+- **Ephemeral workspace**: `rm -rf workspace` at the end of every job.
+- **No permanent repo storage**: Only compact task metadata is kept in Neon.
 
-## Remaining Hardening (future)
+## Remaining / Future
 
-- Network egress restrictions inside the agent step where possible.
-- Explicit allow-list of shell commands if using a more powerful sandbox.
-- Audit log of every task event retained for 7–30 days only.
+- Explicit GitHub API check that the authenticated user has write access to the target repository before dispatch.
+- Rate limiting on task creation.
+- Network egress restrictions inside the agent step.
+- Command allow-listing if a more powerful sandbox is introduced.
