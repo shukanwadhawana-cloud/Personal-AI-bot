@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getTask, updateTask } from '@/lib/tasks';
+import { appendTaskStep, getTask, updateTask } from '@/lib/tasks';
 import { requireUser } from '@/lib/auth';
 
 export async function GET(
@@ -41,6 +41,19 @@ export async function PATCH(
 
   try {
     const body = await req.json();
+
+    if (isWorker && body.step?.name) {
+      const task = await appendTaskStep(params.id, {
+        id: body.step.id,
+        name: String(body.step.name).slice(0, 120),
+        status: ['RUNNING', 'COMPLETED', 'FAILED'].includes(body.step.status) ? body.step.status : 'RUNNING',
+        startedAt: body.step.startedAt,
+        completedAt: body.step.completedAt,
+        detail: body.step.detail ? String(body.step.detail).slice(0, 2000) : undefined,
+      });
+      if (!task) return NextResponse.json({ error: 'Not found' }, { status: 404 });
+      return NextResponse.json(task);
+    }
 
     // Only these fields may ever be written via PATCH
     const allowed = [
