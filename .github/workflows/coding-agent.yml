@@ -1,6 +1,11 @@
 name: Coding Agent Task
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/coding-agent.yml"
   workflow_dispatch:
     inputs:
       task_id:
@@ -35,6 +40,7 @@ permissions:
 
 jobs:
   run-agent:
+    if: ${{ github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
@@ -276,3 +282,38 @@ jobs:
         if: always()
         shell: bash
         run: rm -rf workspace || true
+
+
+  smoke-gemini:
+    if: ${{ github.event_name == 'push' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Aider
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install --quiet aider-chat
+          aider --version
+      - name: Test Gemini OpenAI-compatible route
+        env:
+          OPENAI_API_KEY: ${{ secrets.LLM_API_KEY }}
+          OPENAI_API_BASE: ${{ secrets.LLM_BASE_URL }}
+          AIDER_MODEL: ${{ secrets.LLM_MODEL }}
+        run: |
+          set -euo pipefail
+          if [ -z "$OPENAI_API_KEY" ] || [ -z "$OPENAI_API_BASE" ] || [ -z "$AIDER_MODEL" ]; then
+            echo "LLM secrets are incomplete"
+            exit 1
+          fi
+          MODEL="$AIDER_MODEL"
+          if [[ "$MODEL" != */* ]]; then MODEL="openai/$MODEL"; fi
+          echo "Testing Aider model route: $MODEL"
+          printf '%s' 'Inspect the repository and answer with the framework/package manager you detect. Do not modify any files.' |
+            aider --yes --no-git --model "$MODEL" --message-file /dev/stdin
