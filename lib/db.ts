@@ -51,6 +51,7 @@ export async function ensureSchema(): Promise<void> {
       retry_count   INTEGER NOT NULL DEFAULT 0,
       worker_lease  TEXT,
       heartbeat_at  TIMESTAMPTZ,
+      steps         JSONB NOT NULL DEFAULT '[]'::jsonb,
       created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       started_at    TIMESTAMPTZ,
       completed_at  TIMESTAMPTZ,
@@ -58,6 +59,7 @@ export async function ensureSchema(): Promise<void> {
     )
   `;
 
+  await db`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS steps JSONB NOT NULL DEFAULT '[]'::jsonb`;
   await db`CREATE INDEX IF NOT EXISTS idx_tasks_user_id ON tasks (user_id)`;
   await db`CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks (status)`;
   await db`CREATE INDEX IF NOT EXISTS idx_tasks_updated_at ON tasks (updated_at)`;
