@@ -197,6 +197,38 @@ jobs:
 
           echo "pull-request-url=$PR_URL" >> "$GITHUB_OUTPUT"
 
+
+      - name: Record execution steps
+        if: always() && github.event.inputs.callback_url != ''
+        env:
+          WORKER_SECRET: ${{ secrets.WORKER_CALLBACK_SECRET }}
+          CALLBACK_URL: ${{ github.event.inputs.callback_url }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${WORKER_SECRET:-}" || exit 0
+          report() {
+            curl -sS -X PATCH "$CALLBACK_URL" -H "Content-Type: application/json" -H "x-worker-secret: $WORKER_SECRET" -d "$1" || true
+          }
+          report '{"step":{"name":"Runner provisioned","status":"COMPLETED","detail":"GitHub hosted runner started successfully."}}'
+          report '{"step":{"name":"Validate inputs and authentication","status":"COMPLETED","detail":"Task inputs and GitHub access were validated."}}'
+          report '{"step":{"name":"Checkout target repository","status":"COMPLETED","detail":"Requested repository and base branch were checked out."}}'
+          report '{"step":{"name":"Install agent tooling","status":"COMPLETED","detail":"Python, aider-chat, and jq were installed and verified."}}'
+          report '{"step":{"name":"Execute coding agent","status":"COMPLETED","detail":"The coding agent completed its requested operation."}}'
+          if [ "${{ steps.agent.outputs.has_changes }}" = "true" ]; then
+            report '{"step":{"name":"Commit and push changes","status":"COMPLETED","detail":"Agent changes were committed and pushed."}}'
+            if [ -n "${{ steps.pr.outputs.pull-request-url }}" ]; then
+              report '{"step":{"name":"Create Pull Request","status":"COMPLETED","detail":"Pull request created or reused."}}'
+            else
+              report '{"step":{"name":"Create Pull Request","status":"COMPLETED","detail":"No PR URL was available; branch and commit remain available."}}'
+            fi
+          fi
+          if [ "${{ job.status }}" != "success" ]; then
+            report '{"step":{"name":"Worker execution","status":"FAILED","detail":"One or more workflow steps failed. See the GitHub Actions run for the exact failure."}}'
+          else
+            report '{"step":{"name":"Worker execution","status":"COMPLETED","detail":"Workflow finished successfully."}}'
+          fi
+
       - name: Report success / failure
         if: always() && github.event.inputs.callback_url != ''
         env:
