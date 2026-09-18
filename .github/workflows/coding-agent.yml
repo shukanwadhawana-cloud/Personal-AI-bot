@@ -202,7 +202,7 @@ jobs:
 
 
       - name: Record execution steps
-        if: always() && github.event.inputs.callback_url != '' && github.event.inputs.callback_token != ''
+        if: always() && github.event.inputs.callback_url != '' && github.event.inputs.callback_token != '' && github.event.inputs.callback_token != ''
         env:
           CALLBACK_TOKEN: ${{ github.event.inputs.callback_token }}
           CALLBACK_URL: ${{ github.event.inputs.callback_url }}
@@ -210,7 +210,7 @@ jobs:
         run: |
           set -euo pipefail
                     report() {
-            curl -sS -X PATCH "$CALLBACK_URL" -H "Content-Type: application/json" -H "x-worker-secret: $WORKER_SECRET" -d "$1" || true
+            curl -sS -X PATCH "$CALLBACK_URL" -H "Content-Type: application/json" -H "x-worker-token: $CALLBACK_TOKEN" -d "$1" || true
           }
           report '{"step":{"name":"Runner provisioned","status":"COMPLETED","detail":"GitHub hosted runner started successfully."}}'
           report '{"step":{"name":"Validate inputs and authentication","status":"COMPLETED","detail":"Task inputs and GitHub access were validated."}}'
@@ -234,12 +234,11 @@ jobs:
       - name: Report success / failure
         if: always() && github.event.inputs.callback_url != ''
         env:
-          WORKER_SECRET: ${{ secrets.WORKER_CALLBACK_SECRET }}
+          CALLBACK_TOKEN: ${{ github.event.inputs.callback_token }}
           CALLBACK_URL: ${{ github.event.inputs.callback_url }}
         shell: bash
         run: |
           set -euo pipefail
-          test -n "${WORKER_SECRET:-}" || { echo "WORKER_CALLBACK_SECRET is missing"; exit 1; }
 
           STATUS="FAILED"
           if [ "${{ job.status }}" = "success" ]; then
