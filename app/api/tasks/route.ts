@@ -1,38 +1,56 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { createTask, listTasks } from '@/lib/tasks';
+import { createTask, listTasks, updateTask } from '@/lib/tasks';
+import { z } from 'zod';
 
-// NOTE: Replace the in-memory store with a real free DB before production use.
-// Dispatch to GitHub Actions is performed here when secrets are present.
+const CreateTaskSchema = z.object({
+  repository: z
+    .string()
+    .min(3)
+    .max(200)
+    .regex(/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/, 'Must be owner/repo'),
+  branch: z.string().min(1).max(200).default('main'),
+  prompt: z.string().min(5).max(8000),
+  title: z.string().max(200).optional(),
+});
+
+// NOTE: Auth will be enforced in Phase 3B. Until then a demo user is used
+// so the existing UI continues to function while the DB is verified.
+const DEMO_USER = 'demo-user';
 
 export async function GET() {
-  // In real app: filter by authenticated user
-  const tasks = listTasks('demo-user');
+  const tasks = await listTasks(DEMO_USER);
   return NextResponse.json(tasks);
 }
 
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { repository, branch = 'main', prompt } = body;
-    if (!repository || !prompt) {
-      return NextResponse.json({ error: 'repository and prompt required' }, { status: 400 });
+    const parsed = CreateTaskSchema.safeParse(body);
+    if (!parsed.success) {
+      return NextResponse.json(
+        { error: 'Invalid input', details: parsed.error.flatten() },
+        { status: 400 }
+      );
     }
+    const { repository, branch, prompt, title } = parsed.data;
 
-    const task = createTask({
-      userId: 'demo-user', // replace with real auth
+    const task = await createTask({
+      userId: DEMO_USER,
       repository,
       branch,
       prompt,
+      title: title || prompt.slice(0, 80),
     });
 
-    // Fire-and-forget dispatch to GitHub Actions (requires GITHUB_TOKEN with workflow scope
-    // and the workflow file present). In production use octokit or fetch to api.github.com.
-    const dispatchUrl = `https://api.github.com/repos/${process.env.CONTROL_PLANE_REPO || 'shukanwadhawana-cloud/Personal-AI-bot'}/actions/workflows/coding-agent.yml/dispatches`;
+    // Fire-and-forget dispatch to GitHub Actions
+    const controlPlaneRepo =
+      process.env.CONTROL_PLANE_REPO || 'shukanwadhawana-cloud/Personal-AI-bot';
+    const dispatchUrl = `https://api.github.com/repos/${controlPlaneRepo}/actions/workflows/coding-agent.yml/dispatches`;
     const token = process.env.GITHUB_TOKEN || process.env.AGENT_GITHUB_TOKEN;
 
     if (token) {
       try {
-        await fetch(dispatchUrl, {
+        const res = await fetch(dispatchUrl, {
           method: 'POST',
           headers: {
             Authorization: `Bearer ${token}`,
@@ -51,15 +69,24 @@ export async function POST(req: NextRequest) {
             },
           }),
         });
-        // Mark running optimistically
-        // updateTask(task.id, { status: 'RUNNING' });
+        if (res.ok || res.status === 204) {
+          await updateTask(task.id, { status: 'RUNNING' });
+        }
       } catch (e) {
         console.error('Dispatch failed', e);
+        // Task remains QUEUED; can be retried later
       }
     }
 
-    return NextResponse.json({ id: task.id, status: task.status }, { status: 201 });
+    return NextResponse.json(
+      { id: task.id, status: task.status },
+      { status: 201 }
+    );
   } catch (e: any) {
-    return NextResponse.json({ error: e.message || 'Internal error' }, { status: 500 });
+    console.error('POST /api/tasks error', e?.message || e);
+    return NextResponse.json(
+      { error: e.message || 'Internal error' },
+      { status: 500 }
+    );
   }
 }
