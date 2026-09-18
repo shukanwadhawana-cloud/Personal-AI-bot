@@ -20,6 +20,7 @@ type Task = {
   workerRunId?: string;
   error?: string;
   result?: string;
+  steps?: { id: string; name: string; status: 'RUNNING' | 'COMPLETED' | 'FAILED'; startedAt: string; completedAt?: string; detail?: string }[];
 };
 
 const STATUS_COLORS: Record<string, string> = {
@@ -85,7 +86,7 @@ export default function TaskDetailPage() {
     const interval = setInterval(() => {
       if (statusRef.current && TERMINAL.has(statusRef.current)) return;
       load();
-    }, 8000);
+    }, 3000);
 
     return () => {
       cancelled = true;
@@ -135,6 +136,24 @@ export default function TaskDetailPage() {
       >
         {task.status}
       </div>
+
+      <section style={sectionStyle}>
+        <h2 style={h2Style}>Steps</h2>
+        {(!task.steps || task.steps.length === 0) ? (
+          <p style={{ color: '#777', fontSize: 14 }}>Waiting for worker…</p>
+        ) : (
+          <ol style={{ listStyle: 'none', padding: 0, margin: 0 }}>
+            {task.steps.map((step, index) => (
+              <li key={step.id} style={{ display: 'flex', gap: 12, alignItems: 'flex-start', padding: '10px 0', borderBottom: '1px solid #eee' }}>
+                <span style={{ width: 24, height: 24, borderRadius: 999, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', background: step.status === 'COMPLETED' ? '#16a34a' : step.status === 'FAILED' ? '#dc2626' : '#2563eb', color: '#fff', flexShrink: 0 }}>
+                  {step.status === 'COMPLETED' ? '✓' : step.status === 'FAILED' ? '!' : index + 1}
+                </span>
+                <div><div style={{ fontWeight: 600 }}>{step.name}</div><div style={{ fontSize: 12, color: '#777' }}>{new Date(step.startedAt).toLocaleString()}{step.completedAt ? ' → ' + new Date(step.completedAt).toLocaleString() : ' · in progress'}</div>{step.detail && <div style={{ fontSize: 13, marginTop: 4, whiteSpace: 'pre-wrap' }}>{step.detail}</div>}</div>
+              </li>
+            ))}
+          </ol>
+        )}
+      </section>
 
       <section style={sectionStyle}>
         <h2 style={h2Style}>Prompt</h2>
