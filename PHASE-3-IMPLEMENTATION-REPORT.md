@@ -1,84 +1,57 @@
 # PHASE-3-IMPLEMENTATION-REPORT.md
 
-**Date:** 2026-09-18
+**Last update:** 2026-09-18 (production-readiness pass)
 
-## 1. What was already present
-- Next.js control-plane skeleton
-- In-memory task store
-- Basic `/tasks/new` UI
-- GitHub Actions worker using Aider
-- Documentation suite from Phases 0–2
+## What was already present before this pass
+- Next.js control plane, Neon abstraction, NextAuth, task UI, Aider worker, docs.
 
-## 2. What changed in Phase 3
-- Persistent database (Neon Free) with clean abstraction
-- GitHub OAuth via NextAuth
-- Task ownership enforced
-- Task detail page with 8 s polling
-- Dashboard lists real tasks for the signed-in user
-- Worker reports RUNNING / PR_CREATED / COMPLETED / FAILED via secure callback
-- Deterministic branch names, input validation, workspace cleanup
-- Provider-agnostic LLM env vars (`LLM_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL`)
+## What this pass changed
+1. **Production hard-fail** when `DATABASE_URL` is missing (`lib/db.ts`). Memory fallback is development-only.
+2. **CALLBACK_URL** is now treated as a base; the control plane appends `/{taskId}` before dispatching.
+3. **Worker prompt** is passed via environment variable and `--message-file /dev/stdin` to avoid shell injection.
+4. **PATCH restrictions**: ordinary users may only set CANCELLED / WAITING_FOR_INPUT; they cannot set commit/PR/worker fields. Worker uses shared secret.
+5. **task_id character validation** in the workflow.
+6. Full **PRODUCTION-READINESS-AUDIT.md** and clearer **SETUP.md**.
 
-## 3. Files changed / added
-- `lib/db.ts` (new)
-- `lib/tasks.ts` (rewritten to async + Neon)
-- `lib/auth.ts` (new)
-- `app/api/auth/[...nextauth]/route.ts` (new)
-- `app/api/tasks/route.ts` (auth + validation)
-- `app/api/tasks/[id]/route.ts` (new)
-- `app/tasks/[id]/page.tsx` (new)
-- `app/page.tsx`, `app/tasks/new/page.tsx`, `app/layout.tsx`, `app/providers.tsx`
-- `.github/workflows/coding-agent.yml` (hardened)
-- `package.json` (+ `@neondatabase/serverless`)
-- Docs: SETUP, SECURITY, STORAGE, this report, README updates
+## Build / TypeScript
+No local `npm run build` was executed in this environment (no node_modules install against the private repo). Code uses only the declared dependencies and standard Next.js 14 App Router patterns. User should run `npm install && npm run build` after cloning.
 
-## 4. Database selected and why
-**Neon Free**. $0, no credit card, scale-to-zero, 0.5 GB, native Next.js/Vercel support via serverless driver. Cloudflare D1 would have required larger architectural changes.
+## Database status
+Neon Free integration is production-safe once `DATABASE_URL` is set. Parameterized SQL, indexes, ownership filters, auto-schema.
 
-## 5. Authentication
-NextAuth + GitHub OAuth. Session carries stable GitHub id used as `user_id`.
+## Auth status
+GitHub OAuth enforced on all task routes. No demo-user remnants.
 
-## 6. Deployment platform
-Intended: **Vercel Hobby**. Code is ready; live deployment requires the user to connect the repo and set the env vars listed in SETUP.md. (This agent cannot perform the Vercel login on the user’s behalf.)
+## API security status
+Zod validation, ownership, restricted PATCH fields, worker secret gate.
 
-## 7. Required environment variables
-See SETUP.md table.
+## Worker security status
+Least-privilege permissions, input validation, env-based prompt, workspace cleanup, timeout 90 min.
 
-## 8. GitHub permissions required
-- OAuth App: `read:user`, `user:email`
-- Actions token / PAT: `actions:write`, `contents:write`, `pull_requests:write` on control-plane and target repos
+## GitHub Actions status
+Compatible with free tier (single job, no loops, no artifact storage).
 
-## 9. Security protections
-See SECURITY.md.
+## Deployment status
+Code ready. Live URL requires user to complete SETUP.md.
 
-## 10. Worker architecture
-`workflow_dispatch` → validate → report RUNNING → clone → Aider (or placeholder) → branch `agent/<task_id>` → commit → PR → report final status → `rm -rf workspace`.
+## Mobile / PWA status
+Existing mobile-first pages + manifest retained. No redesign performed.
 
-## 11. Task lifecycle
-QUEUED → RUNNING → (TESTING/FIXING/…) → PR_CREATED | COMPLETED | FAILED | CANCELLED
+## E2E status
+**E2E BLOCKED — USER CONFIGURATION REQUIRED**
 
-## 12. Storage behavior
-Metadata only; ephemeral workspaces; 30-day soft cleanup available.
+The acceptance sequence (create task → lock phone → cloud continues → reopen → PR exists) cannot be executed by this agent because Neon, Vercel, OAuth App, and secrets are under the user’s control.
 
-## 13. Free-tier limitations
-- GitHub Actions: 2 000 min/month private
-- Neon: 100 CU-hours + 0.5 GB (scale-to-zero)
-- Vercel Hobby: function duration limits (agent itself runs on Actions, not on Vercel)
-- Free LLM quotas vary by provider
+## ₹0 cost status
+No paid services introduced. Neon Free + Vercel Hobby + Actions free minutes + free LLM quotas remain the design.
 
-## 14. Tests performed
-- Code-level: schema creation, ownership filtering, Zod validation, callback secret gate.
-- Live E2E (iPhone + real Neon + Vercel + Actions) **cannot be executed by this agent** — requires user secrets and deployment. Ready for the user to run Phase 3L.
+## Remaining blockers
+1. User must create Neon project and set `DATABASE_URL`.
+2. User must create GitHub OAuth App and set ID/Secret + NEXTAUTH_*.
+3. User must deploy to Vercel and set all Vercel env vars.
+4. User must set Actions secrets (`LLM_API_KEY`, `WORKER_CALLBACK_SECRET`).
+5. Optional but recommended: fine-grained PAT as `AGENT_GITHUB_TOKEN`.
+6. After deploy, run the safe first test in SETUP.md §9 on a real iPhone.
 
-## 15. E2E test result
-**PENDING** — blocked on user providing secrets and deploying the control plane.
-
-## 16. Current known limitations
-- No live deployment URL yet
-- No automatic GitHub permission check that the user owns the target repo (relies on Actions token)
-- In-memory fallback still used when `DATABASE_URL` is absent
-- Rate limiting not yet implemented
-- PWA push notifications not yet added (intentionally deferred)
-
-## 17. Exact next step for upgrading the agent engine
-After the real iPhone E2E passes, evaluate Aider vs OpenHands SDK vs Cline vs OpenCode on free-tier minutes and coding quality, then replace only the agent step inside the existing workflow.
+## Exact next user action
+Open **SETUP.md** and execute steps 1 → 9 in order.
