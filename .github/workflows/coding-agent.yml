@@ -168,9 +168,11 @@ jobs:
           echo "LLM provider: Google Gemini OpenAI-compatible endpoint"
           echo "LLM model: $AIDER_MODEL"
           MODEL="$AIDER_MODEL"
-          if [[ "$MODEL" != */* ]]; then
-            MODEL="openai/$MODEL"
-          fi
+          case "$MODEL" in
+            gemini-3.8-flash|models/gemini-3.8-flash) MODEL="openai/gemini-3.6-flash" ;;
+            openai/*) ;;
+            *) MODEL="openai/$MODEL" ;;
+          esac
           echo "Aider model route: $MODEL"
           printf '%s' "$TASK_PROMPT" | aider --yes --no-git --model "$MODEL" --message-file /dev/stdin
 
@@ -313,7 +315,11 @@ jobs:
             exit 1
           fi
           MODEL="$AIDER_MODEL"
-          if [[ "$MODEL" != */* ]]; then MODEL="openai/$MODEL"; fi
+          case "$MODEL" in
+            gemini-3.8-flash|models/gemini-3.8-flash) MODEL="openai/gemini-3.6-flash" ;;
+            openai/*) ;;
+            *) MODEL="openai/$MODEL" ;;
+          esac
           echo "Testing Aider model route: $MODEL"
           printf '%s' 'Inspect the repository and answer with the framework/package manager you detect. Do not modify any files.' |
             aider --yes --no-git --model "$MODEL" --message-file /dev/stdin
