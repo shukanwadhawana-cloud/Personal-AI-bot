@@ -21,6 +21,15 @@ on:
         required: false
 
 jobs:
+  runner-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify GitHub-hosted runner
+        run: |
+          echo "GitHub-hosted runner is operational"
+          echo "Runner: $RUNNER_NAME"
+          echo "OS: $RUNNER_OS"
+
   run-agent:
     runs-on: ubuntu-latest
     timeout-minutes: 90
