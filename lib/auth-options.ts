@@ -7,7 +7,7 @@ export const authOptions: NextAuthOptions = {
       clientId: process.env.GITHUB_ID || '',
       clientSecret: process.env.GITHUB_SECRET || '',
       // Request identity plus repository access needed for Actions dispatch and future repo operations.
-      authorization: { params: { scope: 'read:user user:email' } },
+      authorization: { params: { scope: 'read:user user:email repo' } },
     }),
   ],
   callbacks: {
@@ -16,6 +16,9 @@ export const authOptions: NextAuthOptions = {
         // Persist the GitHub numeric id for stable ownership
         token.githubId = (profile as any).id?.toString();
         token.login = (profile as any).login;
+        // Keep the provider token inside NextAuth's encrypted JWT so server routes
+        // can call GitHub on the signed-in user's behalf without exposing it to the browser.
+        (token as any).githubAccessToken = account.access_token;
       }
       return token;
     },
