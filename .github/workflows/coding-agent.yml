@@ -38,42 +38,60 @@ jobs:
       pull-requests: write
 
     steps:
-      - name: Validate inputs
+      - name: Validate inputs and runner
+        shell: bash
         run: |
+          set -euo pipefail
+          echo "RUNNER_OK"
+          echo "Runner: $RUNNER_NAME"
+          echo "OS: $RUNNER_OS"
           if [[ ! "${{ github.event.inputs.target_repo }}" =~ ^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$ ]]; then
             echo "Invalid repository format"
             exit 1
           fi
-          if [[ -z "${{ github.event.inputs.task_id }}" ]]; then
-            echo "task_id required"
+          if [[ -z "${{ github.event.inputs.task_id }}" || ! "${{ github.event.inputs.task_id }}" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+            echo "Invalid task_id"
             exit 1
           fi
-          if [[ ! "${{ github.event.inputs.task_id }}" =~ ^[a-zA-Z0-9_-]+$ ]]; then
-            echo "Invalid task_id characters"
+          if [[ -z "${{ github.event.inputs.prompt }}" ]]; then
+            echo "prompt required"
             exit 1
           fi
 
       - name: Resolve GitHub token
         id: tok
+        shell: bash
+        env:
+          AGENT_PAT: ${{ secrets.AGENT_GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
           if [ -n "${AGENT_PAT:-}" ]; then
             echo "token_source=AGENT_GITHUB_TOKEN" >> "$GITHUB_OUTPUT"
           else
             echo "token_source=GITHUB_TOKEN" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Validate GitHub CLI and authentication
         env:
-          AGENT_PAT: ${{ secrets.AGENT_GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.AGENT_GITHUB_TOKEN != '' && secrets.AGENT_GITHUB_TOKEN || github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git --version
+          gh --version
+          gh auth status
+          gh api "repos/${{ github.event.inputs.target_repo }}" --jq '.full_name + " (" + .default_branch + ")"'
 
       - name: Report RUNNING
         if: ${{ github.event.inputs.callback_url != '' }}
         env:
           WORKER_SECRET: ${{ secrets.WORKER_CALLBACK_SECRET }}
           CALLBACK_URL: ${{ github.event.inputs.callback_url }}
+        shell: bash
         run: |
-          curl -sS -X PATCH "$CALLBACK_URL" \
-            -H "Content-Type: application/json" \
-            -H "x-worker-secret: $WORKER_SECRET" \
-            -d "{\"status\":\"RUNNING\",\"workerRunId\":\"${{ github.run_id }}\",\"heartbeatAt\":\"$(date -u -Iseconds)\"}" || true
+          set -euo pipefail
+          test -n "${WORKER_SECRET:-}" || { echo "WORKER_CALLBACK_SECRET is missing"; exit 1; }
+          curl --fail-with-body -sS -X PATCH "$CALLBACK_URL"             -H "Content-Type: application/json"             -H "x-worker-secret: $WORKER_SECRET"             -d '{"status":"RUNNING","workerRunId":"${{ github.run_id }}","heartbeatAt":"'$(date -u -Iseconds)'"}'
 
       - name: Checkout target repository
         uses: actions/checkout@v4
@@ -82,6 +100,7 @@ jobs:
           token: ${{ secrets.AGENT_GITHUB_TOKEN != '' && secrets.AGENT_GITHUB_TOKEN || github.token }}
           path: workspace
           ref: ${{ github.event.inputs.target_branch }}
+          fetch-depth: 0
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -89,12 +108,13 @@ jobs:
           python-version: '3.12'
 
       - name: Install agent tooling
+        shell: bash
         run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
           pip install --quiet aider-chat
-          if ! command -v jq >/dev/null 2>&1; then
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq jq
-          fi
+          jq --version
+          aider --version
 
       - name: Execute agent loop
         id: agent
@@ -106,6 +126,7 @@ jobs:
           TASK_ID: ${{ github.event.inputs.task_id }}
           GH_TOKEN: ${{ secrets.AGENT_GITHUB_TOKEN != '' && secrets.AGENT_GITHUB_TOKEN || github.token }}
         working-directory: workspace
+        shell: bash
         run: |
           set -euo pipefail
           echo "=== Personal AI Bot task $TASK_ID ==="
@@ -113,32 +134,37 @@ jobs:
 
           git config user.name "Personal-AI-Bot"
           git config user.email "bot@users.noreply.github.com"
+
           BRANCH="agent/$TASK_ID"
+          if git show-ref --verify --quiet "refs/remotes/origin/$BRANCH"; then
+            echo "Remote branch $BRANCH already exists; refusing to overwrite it."
+            exit 1
+          fi
           git checkout -b "$BRANCH"
 
-          if [ -n "${OPENAI_API_KEY:-}" ]; then
-            AIDER_ARGS=(--yes --no-git --message-file /dev/stdin)
-            if [ -n "${AIDER_MODEL:-}" ]; then
-              AIDER_ARGS+=(--model "$AIDER_MODEL")
-            fi
-            printf '%s' "$TASK_PROMPT" | aider "${AIDER_ARGS[@]}" || echo "Aider exited non-zero (continuing)"
-          else
-            echo "No LLM_API_KEY — writing minimal safe placeholder for pipeline verification"
-            mkdir -p diagnostics
-            echo "coding agent executed successfully $(date -u -Iseconds)" > diagnostics/CODING_AGENT_E2E.md
-            echo "# Agent placeholder $(date -u -Iseconds)" >> AGENT_PLACEHOLDER.md
+          if [ -z "${OPENAI_API_KEY:-}" ]; then
+            echo "LLM_API_KEY is missing; cannot execute the coding agent."
+            exit 1
           fi
+          if [ -z "${AIDER_MODEL:-}" ]; then
+            echo "LLM_MODEL is missing; cannot execute the coding agent."
+            exit 1
+          fi
+
+          printf '%s' "$TASK_PROMPT" | aider             --yes             --no-git             --model "$AIDER_MODEL"             --message-file /dev/stdin
 
           git add -A
           if git diff --cached --quiet; then
+            echo "Agent completed but produced no changes."
             echo "has_changes=false" >> "$GITHUB_OUTPUT"
-          else
-            git commit -m "agent($TASK_ID): automated changes"
-            git push -u origin "$BRANCH"
-            echo "has_changes=true" >> "$GITHUB_OUTPUT"
-            echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
-            echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+            exit 1
           fi
+
+          git commit -m "agent($TASK_ID): automated changes"
+          git push -u origin "$BRANCH"
+          echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Create Pull Request
         id: pr
@@ -148,58 +174,43 @@ jobs:
           TASK_ID: ${{ github.event.inputs.task_id }}
           TARGET_BRANCH: ${{ github.event.inputs.target_branch }}
         working-directory: workspace
+        shell: bash
         run: |
           set -euo pipefail
           BRANCH="agent/$TASK_ID"
-          PR_URL=$(gh pr create \
-            --base "$TARGET_BRANCH" \
-            --head "$BRANCH" \
-            --title "[Personal AI Bot] $TASK_ID" \
-            --body "## Automated coding task
+          PR_URL=$(gh pr create             --base "$TARGET_BRANCH"             --head "$BRANCH"             --title "[Personal AI Bot] $TASK_ID"             --body "## Automated coding task
 
-**Task ID:** \`$TASK_ID\`
+**Task ID:** `$TASK_ID`
 
-Generated by the Personal AI Bot control plane. Review carefully before merging." \
-            || true)
-          if [ -n "${PR_URL:-}" ]; then
-            echo "pull-request-url=$PR_URL" >> "$GITHUB_OUTPUT"
-            echo "Created PR: $PR_URL"
-          else
-            EXISTING=$(gh pr list --head "$BRANCH" --json url --jq '.[0].url' || true)
-            if [ -n "$EXISTING" ]; then
-              echo "pull-request-url=$EXISTING" >> "$GITHUB_OUTPUT"
-              echo "Reusing existing PR: $EXISTING"
-            else
-              echo "Warning: could not create or find PR"
-            fi
-          fi
+Generated by the Personal AI Bot control plane. Review carefully before merging.")
+          test -n "$PR_URL"
+          echo "pull-request-url=$PR_URL" >> "$GITHUB_OUTPUT"
+          echo "Created PR: $PR_URL"
 
       - name: Report success / failure
         if: always() && github.event.inputs.callback_url != ''
         env:
           WORKER_SECRET: ${{ secrets.WORKER_CALLBACK_SECRET }}
           CALLBACK_URL: ${{ github.event.inputs.callback_url }}
+        shell: bash
         run: |
+          set -euo pipefail
+          test -n "${WORKER_SECRET:-}" || { echo "WORKER_CALLBACK_SECRET is missing"; exit 1; }
+
           STATUS="FAILED"
           if [ "${{ job.status }}" = "success" ]; then
-            if [ "${{ steps.agent.outputs.has_changes }}" = "true" ]; then
+            if [ "${{ steps.agent.outputs.has_changes }}" = "true" ] && [ -n "${{ steps.pr.outputs.pull-request-url }}" ]; then
               STATUS="PR_CREATED"
             else
               STATUS="COMPLETED"
             fi
           fi
-          PAYLOAD=$(jq -n \
-            --arg status "$STATUS" \
-            --arg run "${{ github.run_id }}" \
-            --arg commit "${{ steps.agent.outputs.commit }}" \
-            --arg pr "${{ steps.pr.outputs.pull-request-url }}" \
-            '{status:$status, workerRunId:$run, commitSha:$commit, prUrl:$pr}')
-          curl -sS -X PATCH "$CALLBACK_URL" \
-            -H "Content-Type: application/json" \
-            -H "x-worker-secret: $WORKER_SECRET" \
-            -d "$PAYLOAD" || true
+
+          PAYLOAD=$(jq -n             --arg status "$STATUS"             --arg run "${{ github.run_id }}"             --arg commit "${{ steps.agent.outputs.commit }}"             --arg pr "${{ steps.pr.outputs.pull-request-url }}"             '{status:$status, workerRunId:$run, commitSha:$commit, prUrl:$pr}')
+
+          curl --fail-with-body -sS -X PATCH "$CALLBACK_URL"             -H "Content-Type: application/json"             -H "x-worker-secret: $WORKER_SECRET"             -d "$PAYLOAD"
 
       - name: Cleanup workspace (ephemeral)
         if: always()
-        run: |
-          rm -rf workspace || true
+        shell: bash
+        run: rm -rf workspace || true
