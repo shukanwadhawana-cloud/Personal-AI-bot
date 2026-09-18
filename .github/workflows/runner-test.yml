@@ -1,0 +1,20 @@
+name: Runner Diagnostic
+
+on:
+  workflow_dispatch:
+
+jobs:
+  runner-test:
+    name: GitHub-hosted runner smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Verify runner
+        run: |
+          echo "GitHub-hosted runner is operational"
+          echo "Runner: $RUNNER_NAME"
+          echo "OS: $RUNNER_OS"
+          echo "Architecture: $RUNNER_ARCH"
+          uname -a
