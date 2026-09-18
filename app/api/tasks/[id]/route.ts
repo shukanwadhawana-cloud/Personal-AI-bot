@@ -17,17 +17,23 @@ export async function GET(
   return NextResponse.json(task);
 }
 
-/** Internal callback from GitHub Actions worker — protected by a shared secret */
+/**
+ * PATCH is used in two modes:
+ * 1. Authenticated user — can only update their own task; limited fields.
+ * 2. Worker callback — identified by x-worker-secret; can update status/result fields
+ *    without a user session (ownership already established at creation time).
+ *
+ * Protected fields (userId, createdAt, id) are never accepted from the body.
+ */
 export async function PATCH(
   req: NextRequest,
   { params }: { params: { id: string } }
 ) {
   const secret = req.headers.get('x-worker-secret');
   const expected = process.env.WORKER_CALLBACK_SECRET;
+  const isWorker = Boolean(expected && secret && secret === expected);
 
-  // Allow either authenticated user (manual update) or worker with shared secret
   const auth = await requireUser();
-  const isWorker = expected && secret === expected;
 
   if (!auth && !isWorker) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
@@ -35,6 +41,8 @@ export async function PATCH(
 
   try {
     const body = await req.json();
+
+    // Only these fields may ever be written via PATCH
     const allowed = [
       'status',
       'error',
@@ -47,13 +55,36 @@ export async function PATCH(
       'workerLease',
     ] as const;
 
-    const patch: Record<string, any> = {};
+    const patch: Record<string, unknown> = {};
     for (const key of allowed) {
       if (body[key] !== undefined) patch[key] = body[key];
     }
 
-    const userId = auth?.userId; // worker updates may omit ownership check
-    const task = await updateTask(params.id, patch, userId);
+    // Users cannot escalate status to COMPLETED/PR_CREATED themselves
+    // (only the worker should do that). Allow CANCELLED for the owner.
+    if (auth && !isWorker) {
+      if (
+        patch.status &&
+        !['CANCELLED', 'WAITING_FOR_INPUT'].includes(String(patch.status))
+      ) {
+        return NextResponse.json(
+          { error: 'Users may only set status to CANCELLED or WAITING_FOR_INPUT' },
+          { status: 403 }
+        );
+      }
+      // Users cannot set commit/PR fields
+      delete patch.commitSha;
+      delete patch.prUrl;
+      delete patch.deploymentUrl;
+      delete patch.workerRunId;
+      delete patch.workerLease;
+      delete patch.heartbeatAt;
+    }
+
+    // Worker path: do not pass userId so updateTask can find the row by id alone.
+    // User path: enforce ownership.
+    const userId = isWorker ? undefined : auth!.userId;
+    const task = await updateTask(params.id, patch as any, userId);
     if (!task) {
       return NextResponse.json({ error: 'Not found' }, { status: 404 });
     }

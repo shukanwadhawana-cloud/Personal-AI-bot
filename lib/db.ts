@@ -3,7 +3,10 @@
  * Only task metadata is stored. Never repository contents.
  *
  * Env: DATABASE_URL (Neon connection string)
- * When DATABASE_URL is absent the in-memory fallback in tasks.ts is used.
+ *
+ * PRODUCTION RULE: if NODE_ENV=production and DATABASE_URL is missing,
+ * getSql() throws so the app cannot silently fall back to memory.
+ * Development still allows the in-memory fallback in tasks.ts.
  */
 
 import { neon, NeonQueryFunction } from '@neondatabase/serverless';
@@ -11,9 +14,17 @@ import { neon, NeonQueryFunction } from '@neondatabase/serverless';
 let sql: NeonQueryFunction<false, false> | null = null;
 
 export function getSql(): NeonQueryFunction<false, false> | null {
-  if (!process.env.DATABASE_URL) return null;
+  const url = process.env.DATABASE_URL;
+  if (!url) {
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error(
+        'DATABASE_URL is required in production. Set a Neon Free connection string.'
+      );
+    }
+    return null; // development-only memory fallback
+  }
   if (!sql) {
-    sql = neon(process.env.DATABASE_URL);
+    sql = neon(url);
   }
   return sql;
 }
@@ -47,7 +58,6 @@ export async function ensureSchema(): Promise<void> {
     )
   `;
 
-  // Indexes for ownership + status queries and cleanup
   await db`CREATE INDEX IF NOT EXISTS idx_tasks_user_id ON tasks (user_id)`;
   await db`CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks (status)`;
   await db`CREATE INDEX IF NOT EXISTS idx_tasks_updated_at ON tasks (updated_at)`;

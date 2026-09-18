@@ -40,9 +40,6 @@ export async function POST(req: NextRequest) {
     }
     const { repository, branch, prompt, title } = parsed.data;
 
-    // Basic authorization: user may only target repos they own or have been granted access to.
-    // Full repo-permission check will be added later via GitHub API; for now we accept the claim
-    // and rely on the Actions token scopes to enforce write access.
     const task = await createTask({
       userId: auth.userId,
       repository,
@@ -55,6 +52,12 @@ export async function POST(req: NextRequest) {
       process.env.CONTROL_PLANE_REPO || 'shukanwadhawana-cloud/Personal-AI-bot';
     const dispatchUrl = `https://api.github.com/repos/${controlPlaneRepo}/actions/workflows/coding-agent.yml/dispatches`;
     const token = process.env.GITHUB_TOKEN || process.env.AGENT_GITHUB_TOKEN;
+
+    // Build the full callback URL that includes the task id
+    const baseCallback = process.env.CALLBACK_URL; // e.g. https://app.vercel.app/api/tasks
+    const callbackUrl = baseCallback
+      ? `${baseCallback.replace(/\/$/, '')}/${task.id}`
+      : '';
 
     if (token) {
       try {
@@ -73,12 +76,15 @@ export async function POST(req: NextRequest) {
               target_repo: repository,
               target_branch: branch,
               prompt,
-              callback_url: process.env.CALLBACK_URL || '',
+              callback_url: callbackUrl,
             },
           }),
         });
         if (res.ok || res.status === 204) {
           await updateTask(task.id, { status: 'RUNNING' }, auth.userId);
+        } else {
+          const text = await res.text().catch(() => '');
+          console.error('Dispatch failed', res.status, text);
         }
       } catch (e) {
         console.error('Dispatch failed', e);
