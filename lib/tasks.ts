@@ -42,6 +42,16 @@ export interface Task {
   commitSha?: string;
   prUrl?: string;
   deploymentUrl?: string;
+  steps: TaskStep[];
+}
+
+export interface TaskStep {
+  id: string;
+  name: string;
+  status: 'RUNNING' | 'COMPLETED' | 'FAILED';
+  startedAt: string;
+  completedAt?: string;
+  detail?: string;
 }
 
 // ---------- In-memory fallback (local / no DATABASE_URL) ----------
@@ -69,11 +79,12 @@ function rowToTask(row: any): Task {
     commitSha: row.commit_sha ?? undefined,
     prUrl: row.pr_url ?? undefined,
     deploymentUrl: row.deployment_url ?? undefined,
+    steps: Array.isArray(row.steps) ? row.steps : (typeof row.steps === 'string' ? JSON.parse(row.steps || '[]') : []),
   };
 }
 
 export async function createTask(
-  partial: Omit<Task, 'id' | 'createdAt' | 'updatedAt' | 'retryCount' | 'status'> & { title?: string }
+  partial: Omit<Task, 'id' | 'createdAt' | 'updatedAt' | 'retryCount' | 'status' | 'steps'> & { title?: string }
 ): Promise<Task> {
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
@@ -84,6 +95,7 @@ export async function createTask(
     createdAt: now,
     updatedAt: now,
     retryCount: 0,
+    steps: [],
   };
 
   const db = getSql();
@@ -92,11 +104,11 @@ export async function createTask(
     await db`
       INSERT INTO tasks (
         id, user_id, repository, title, prompt, status, branch,
-        retry_count, created_at, updated_at
+        retry_count, steps, created_at, updated_at
       ) VALUES (
         ${task.id}, ${task.userId}, ${task.repository}, ${task.title ?? null},
         ${task.prompt}, ${task.status}, ${task.branch},
-        ${task.retryCount}, ${task.createdAt}, ${task.updatedAt}
+        ${task.retryCount}, ${JSON.stringify(task.steps)}, ${task.createdAt}, ${task.updatedAt}
       )
     `;
   } else {
@@ -184,6 +196,7 @@ export async function updateTask(
         heartbeat_at = ${next.heartbeatAt ?? null},
         started_at = ${next.startedAt ?? null},
         completed_at = ${next.completedAt ?? null},
+        steps = ${JSON.stringify(next.steps)},
         updated_at = ${next.updatedAt}
       WHERE id = ${id}
     `;
@@ -191,6 +204,28 @@ export async function updateTask(
     _store.set(id, next);
   }
   return next;
+}
+
+export async function appendTaskStep(
+  id: string,
+  step: Omit<TaskStep, 'id' | 'startedAt'> & { id?: string; startedAt?: string }
+): Promise<Task | undefined> {
+  const existing = await getTask(id);
+  if (!existing) return undefined;
+  const now = new Date().toISOString();
+  const incoming: TaskStep = {
+    id: step.id || crypto.randomUUID(),
+    name: step.name,
+    status: step.status,
+    startedAt: step.startedAt || now,
+    completedAt: step.completedAt,
+    detail: step.detail,
+  };
+  const steps = [...(existing.steps || [])];
+  const index = steps.findIndex(s => s.id === incoming.id);
+  if (index >= 0) steps[index] = { ...steps[index], ...incoming };
+  else steps.push(incoming);
+  return updateTask(id, { steps });
 }
 
 /** Soft cleanup of old completed tasks (called by scheduled job or on demand) */
