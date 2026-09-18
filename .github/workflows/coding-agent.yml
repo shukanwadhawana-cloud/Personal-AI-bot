@@ -24,6 +24,10 @@ on:
         description: Full URL to PATCH (e.g. https://app/api/tasks/id)
         required: false
         type: string
+      callback_token:
+        description: Per-task callback credential
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -83,15 +87,14 @@ jobs:
           gh api "repos/${{ github.event.inputs.target_repo }}" --jq '.full_name + " (" + .default_branch + ")"'
 
       - name: Report RUNNING
-        if: ${{ github.event.inputs.callback_url != '' }}
+        if: ${{ github.event.inputs.callback_url != '' && github.event.inputs.callback_token != '' }}
         env:
-          WORKER_SECRET: ${{ secrets.WORKER_CALLBACK_SECRET }}
+          CALLBACK_TOKEN: ${{ github.event.inputs.callback_token }}
           CALLBACK_URL: ${{ github.event.inputs.callback_url }}
         shell: bash
         run: |
           set -euo pipefail
-          test -n "${WORKER_SECRET:-}" || { echo "WORKER_CALLBACK_SECRET is missing"; exit 1; }
-          curl --fail-with-body -sS -X PATCH "$CALLBACK_URL"             -H "Content-Type: application/json"             -H "x-worker-secret: $WORKER_SECRET"             -d '{"status":"RUNNING","workerRunId":"${{ github.run_id }}","heartbeatAt":"'$(date -u -Iseconds)'"}'
+                    curl --fail-with-body -sS -X PATCH "$CALLBACK_URL"             -H "Content-Type: application/json"             -H "x-worker-token: $CALLBACK_TOKEN"             -d '{"status":"RUNNING","workerRunId":"${{ github.run_id }}","heartbeatAt":"'$(date -u -Iseconds)'"}'
 
       - name: Checkout target repository
         uses: actions/checkout@v4
@@ -199,15 +202,14 @@ jobs:
 
 
       - name: Record execution steps
-        if: always() && github.event.inputs.callback_url != ''
+        if: always() && github.event.inputs.callback_url != '' && github.event.inputs.callback_token != ''
         env:
-          WORKER_SECRET: ${{ secrets.WORKER_CALLBACK_SECRET }}
+          CALLBACK_TOKEN: ${{ github.event.inputs.callback_token }}
           CALLBACK_URL: ${{ github.event.inputs.callback_url }}
         shell: bash
         run: |
           set -euo pipefail
-          test -n "${WORKER_SECRET:-}" || exit 0
-          report() {
+                    report() {
             curl -sS -X PATCH "$CALLBACK_URL" -H "Content-Type: application/json" -H "x-worker-secret: $WORKER_SECRET" -d "$1" || true
           }
           report '{"step":{"name":"Runner provisioned","status":"COMPLETED","detail":"GitHub hosted runner started successfully."}}'
