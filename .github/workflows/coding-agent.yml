@@ -124,7 +124,6 @@ jobs:
         id: agent
         env:
           GEMINI_API_KEY: ${{ secrets.LLM_API_KEY }}
-          AIDER_MODEL: ${{ secrets.LLM_MODEL }}
           TASK_PROMPT: ${{ github.event.inputs.prompt }}
           TASK_ID: ${{ github.event.inputs.task_id }}
           GH_TOKEN: ${{ secrets.AGENT_GITHUB_TOKEN != '' && secrets.AGENT_GITHUB_TOKEN || github.token }}
@@ -151,8 +150,7 @@ jobs:
             exit 1
           fi
 
-          echo "LLM provider: Google Gemini OpenAI-compatible endpoint"
-          echo "LLM model: $AIDER_MODEL"
+          echo "LLM provider: Google Gemini API"
           MODEL="gemini/gemini-3.6-flash"
           echo "Aider model route: $MODEL"
           printf '%s' "$TASK_PROMPT" | aider --yes --no-git --model "$MODEL" --message-file /dev/stdin
