@@ -15,5 +15,7 @@ jobs:
         with:
           node-version: 20
           cache: npm
-      - run: npm ci
+      # This repository intentionally does not commit a lockfile yet. Use npm install until
+      # dependency-locking is introduced as a deliberate separate change.
+      - run: npm install --no-audit --no-fund
       - run: npm run build
