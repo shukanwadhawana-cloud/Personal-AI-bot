@@ -1,11 +1,6 @@
 name: Coding Agent Task
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - ".github/workflows/coding-agent.yml"
   workflow_dispatch:
     inputs:
       task_id:
@@ -151,16 +146,8 @@ jobs:
             git checkout -b "$BRANCH"
           fi
 
-          if [ -z "${OPENAI_API_KEY:-}" ]; then
+          if [ -z "${GEMINI_API_KEY:-}" ]; then
             echo "LLM_API_KEY is missing; cannot execute the coding agent."
-            exit 1
-          fi
-          if [ -z "${OPENAI_API_BASE:-}" ]; then
-            echo "LLM_BASE_URL is missing; cannot execute the coding agent."
-            exit 1
-          fi
-          if [ -z "${AIDER_MODEL:-}" ]; then
-            echo "LLM_MODEL is missing; cannot execute the coding agent."
             exit 1
           fi
 
@@ -279,35 +266,3 @@ jobs:
         shell: bash
         run: rm -rf workspace || true
 
-
-  smoke-gemini:
-    if: ${{ github.event_name == 'push' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Install Aider
-        run: |
-          set -euo pipefail
-          python -m pip install --upgrade pip
-          pip install --quiet aider-chat
-          aider --version
-      - name: Test Gemini OpenAI-compatible route
-        env:
-          GEMINI_API_KEY: ${{ secrets.LLM_API_KEY }}
-          AIDER_MODEL: ${{ secrets.LLM_MODEL }}
-        run: |
-          set -euo pipefail
-          if [ -z "$GEMINI_API_KEY" ]; then
-            echo "LLM_API_KEY is missing"
-            exit 1
-          fi
-          MODEL="gemini/gemini-3.6-flash"
-          echo "Testing Aider model route: $MODEL"
-          printf '%s' 'Inspect the repository and answer with the framework/package manager you detect. Do not modify any files.' |
-            aider --yes --no-git --model "$MODEL" --message-file /dev/stdin
