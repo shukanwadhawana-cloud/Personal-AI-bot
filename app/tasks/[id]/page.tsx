@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { useParams } from 'next/navigation';
 
 type Task = {
@@ -35,12 +35,16 @@ const STATUS_COLORS: Record<string, string> = {
   CANCELLED: '#9ca3af',
 };
 
+const TERMINAL = new Set(['COMPLETED', 'FAILED', 'CANCELLED', 'PR_CREATED']);
+const CONTROL_PLANE_REPO = 'shukanwadhawana-cloud/Personal-AI-bot';
+
 export default function TaskDetailPage() {
   const params = useParams();
   const id = params?.id as string;
   const [task, setTask] = useState<Task | null>(null);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
+  const statusRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!id) return;
@@ -50,18 +54,23 @@ export default function TaskDetailPage() {
       try {
         const res = await fetch(`/api/tasks/${id}`);
         if (res.status === 401) {
-          setError('Please sign in');
-          setLoading(false);
+          if (!cancelled) {
+            setError('Please sign in');
+            setLoading(false);
+          }
           return;
         }
         if (!res.ok) {
-          setError('Task not found');
-          setLoading(false);
+          if (!cancelled) {
+            setError('Task not found');
+            setLoading(false);
+          }
           return;
         }
         const data = await res.json();
         if (!cancelled) {
           setTask(data);
+          statusRef.current = data.status;
           setLoading(false);
         }
       } catch {
@@ -73,11 +82,8 @@ export default function TaskDetailPage() {
     }
 
     load();
-    // Poll every 8 s while the task is not terminal
     const interval = setInterval(() => {
-      if (task && ['COMPLETED', 'FAILED', 'CANCELLED', 'PR_CREATED'].includes(task.status)) {
-        return;
-      }
+      if (statusRef.current && TERMINAL.has(statusRef.current)) return;
       load();
     }, 8000);
 
@@ -85,7 +91,7 @@ export default function TaskDetailPage() {
       cancelled = true;
       clearInterval(interval);
     };
-  }, [id, task?.status]);
+  }, [id]);
 
   if (loading) {
     return (
@@ -153,7 +159,7 @@ export default function TaskDetailPage() {
               <li>
                 Worker run:{' '}
                 <a
-                  href={`https://github.com/${process.env.NEXT_PUBLIC_CONTROL_PLANE_REPO || 'shukanwadhawana-cloud/Personal-AI-bot'}/actions/runs/${task.workerRunId}`}
+                  href={`https://github.com/${CONTROL_PLANE_REPO}/actions/runs/${task.workerRunId}`}
                   target="_blank"
                   rel="noreferrer"
                 >
@@ -161,7 +167,11 @@ export default function TaskDetailPage() {
                 </a>
               </li>
             )}
-            {task.commitSha && <li>Commit: <code>{task.commitSha.slice(0, 7)}</code></li>}
+            {task.commitSha && (
+              <li>
+                Commit: <code>{task.commitSha.slice(0, 7)}</code>
+              </li>
+            )}
             {task.prUrl && (
               <li>
                 PR:{' '}
@@ -212,7 +222,13 @@ const pageStyle: React.CSSProperties = {
   margin: '0 auto',
 };
 const sectionStyle: React.CSSProperties = { marginBottom: 24 };
-const h2Style: React.CSSProperties = { fontSize: 14, textTransform: 'uppercase', letterSpacing: 0.5, color: '#666', marginBottom: 8 };
+const h2Style: React.CSSProperties = {
+  fontSize: 14,
+  textTransform: 'uppercase',
+  letterSpacing: 0.5,
+  color: '#666',
+  marginBottom: 8,
+};
 const preStyle: React.CSSProperties = {
   whiteSpace: 'pre-wrap',
   wordBreak: 'break-word',
