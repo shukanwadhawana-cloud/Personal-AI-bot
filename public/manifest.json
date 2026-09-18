@@ -1,0 +1,9 @@
+{
+  "name": "Personal AI Bot",
+  "short_name": "AI Bot",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#fafafa",
+  "theme_color": "#111",
+  "icons": []
+}
