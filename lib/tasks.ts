@@ -70,7 +70,7 @@ function rowToTask(row: any): Task {
     updatedAt: row.updated_at instanceof Date ? row.updated_at.toISOString() : String(row.updated_at),
     startedAt: row.started_at ? (row.started_at instanceof Date ? row.started_at.toISOString() : String(row.started_at)) : undefined,
     completedAt: row.completed_at ? (row.completed_at instanceof Date ? row.completed_at.toISOString() : String(row.completed_at)) : undefined,
-    workerLease: row.worker_lease ?? undefined,
+    // Do not expose the worker callback credential through normal task reads.
     heartbeatAt: row.heartbeat_at ? (row.heartbeat_at instanceof Date ? row.heartbeat_at.toISOString() : String(row.heartbeat_at)) : undefined,
     workerRunId: row.worker_run_id ?? undefined,
     retryCount: Number(row.retry_count ?? 0),
@@ -88,8 +88,10 @@ export async function createTask(
 ): Promise<Task> {
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
+  const workerLease = partial.workerLease || crypto.randomUUID();
   const task: Task = {
     ...partial,
+    workerLease,
     id,
     status: 'QUEUED',
     createdAt: now,
@@ -104,11 +106,11 @@ export async function createTask(
     await db`
       INSERT INTO tasks (
         id, user_id, repository, title, prompt, status, branch,
-        retry_count, steps, created_at, updated_at
+        retry_count, worker_lease, steps, created_at, updated_at
       ) VALUES (
         ${task.id}, ${task.userId}, ${task.repository}, ${task.title ?? null},
         ${task.prompt}, ${task.status}, ${task.branch},
-        ${task.retryCount}, ${JSON.stringify(task.steps)}, ${task.createdAt}, ${task.updatedAt}
+        ${task.retryCount}, ${task.workerLease}, ${JSON.stringify(task.steps)}, ${task.createdAt}, ${task.updatedAt}
       )
     `;
   } else {
@@ -131,6 +133,17 @@ export async function getTask(id: string, userId?: string): Promise<Task | undef
   if (!t) return undefined;
   if (userId && t.userId !== userId) return undefined;
   return t;
+}
+
+
+export async function getTaskWorkerLease(id: string): Promise<string | undefined> {
+  const db = getSql();
+  if (db) {
+    await ensureSchema();
+    const rows = await db`SELECT worker_lease FROM tasks WHERE id = ${id} LIMIT 1`;
+    return rows?.[0]?.worker_lease ?? undefined;
+  }
+  return _store.get(id)?.workerLease;
 }
 
 export async function listTasks(userId: string): Promise<Task[]> {
