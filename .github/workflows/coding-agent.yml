@@ -128,8 +128,7 @@ jobs:
       - name: Execute agent loop
         id: agent
         env:
-          OPENAI_API_KEY: ${{ secrets.LLM_API_KEY }}
-          OPENAI_API_BASE: ${{ secrets.LLM_BASE_URL }}
+          GEMINI_API_KEY: ${{ secrets.LLM_API_KEY }}
           AIDER_MODEL: ${{ secrets.LLM_MODEL }}
           TASK_PROMPT: ${{ github.event.inputs.prompt }}
           TASK_ID: ${{ github.event.inputs.task_id }}
@@ -167,12 +166,7 @@ jobs:
 
           echo "LLM provider: Google Gemini OpenAI-compatible endpoint"
           echo "LLM model: $AIDER_MODEL"
-          MODEL="$AIDER_MODEL"
-          case "$MODEL" in
-            gemini-3.8-flash|models/gemini-3.8-flash) MODEL="openai/gemini-3.6-flash" ;;
-            openai/*) ;;
-            *) MODEL="openai/$MODEL" ;;
-          esac
+          MODEL="gemini/gemini-3.6-flash"
           echo "Aider model route: $MODEL"
           printf '%s' "$TASK_PROMPT" | aider --yes --no-git --model "$MODEL" --message-file /dev/stdin
 
@@ -305,21 +299,15 @@ jobs:
           aider --version
       - name: Test Gemini OpenAI-compatible route
         env:
-          OPENAI_API_KEY: ${{ secrets.LLM_API_KEY }}
-          OPENAI_API_BASE: ${{ secrets.LLM_BASE_URL }}
+          GEMINI_API_KEY: ${{ secrets.LLM_API_KEY }}
           AIDER_MODEL: ${{ secrets.LLM_MODEL }}
         run: |
           set -euo pipefail
-          if [ -z "$OPENAI_API_KEY" ] || [ -z "$OPENAI_API_BASE" ] || [ -z "$AIDER_MODEL" ]; then
-            echo "LLM secrets are incomplete"
+          if [ -z "$GEMINI_API_KEY" ]; then
+            echo "LLM_API_KEY is missing"
             exit 1
           fi
-          MODEL="$AIDER_MODEL"
-          case "$MODEL" in
-            gemini-3.8-flash|models/gemini-3.8-flash) MODEL="openai/gemini-3.6-flash" ;;
-            openai/*) ;;
-            *) MODEL="openai/$MODEL" ;;
-          esac
+          MODEL="gemini/gemini-3.6-flash"
           echo "Testing Aider model route: $MODEL"
           printf '%s' 'Inspect the repository and answer with the framework/package manager you detect. Do not modify any files.' |
             aider --yes --no-git --model "$MODEL" --message-file /dev/stdin
