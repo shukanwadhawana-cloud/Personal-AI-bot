@@ -127,14 +127,25 @@ jobs:
         run: |
           set -euo pipefail
           BRANCH="agent/$TASK_ID"
+          set +e
           PR_URL=$(gh pr create \
             --base "$TARGET_BRANCH" \
             --head "$BRANCH" \
             --title "[Personal AI Bot] $TASK_ID" \
-            --body "Automated coding task $TASK_ID" \
-            || true)
-          if [ -z "${PR_URL:-}" ]; then
-            PR_URL=$(gh pr list --head "$BRANCH" --json url --jq '.[0].url' || true)
+            --body "Automated coding task $TASK_ID" 2>&1)
+          PR_EC=$?
+          set -e
+          if [ $PR_EC -ne 0 ] || [[ "$PR_URL" != https://* ]]; then
+            echo "gh pr create failed (exit $PR_EC): $PR_URL"
+            echo "If message mentions Actions is not permitted to create PRs,"
+            echo "enable: Settings → Actions → General → Workflow permissions →"
+            echo "Allow GitHub Actions to create and approve pull requests"
+            EXISTING=$(gh pr list --head "$BRANCH" --json url --jq '.[0].url' || true)
+            if [ -n "$EXISTING" ] && [[ "$EXISTING" == https://* ]]; then
+              PR_URL="$EXISTING"
+            else
+              PR_URL=""
+            fi
           fi
           echo "pull-request-url=${PR_URL:-}" >> "$GITHUB_OUTPUT"
           echo "PR: ${PR_URL:-none}"
@@ -147,8 +158,11 @@ jobs:
         run: |
           STATUS="FAILED"
           if [ "${{ job.status }}" = "success" ]; then
-            if [ "${{ steps.agent.outputs.has_changes }}" = "true" ]; then
+            if [ -n "${{ steps.pr.outputs.pull-request-url }}" ]; then
               STATUS="PR_CREATED"
+            elif [ "${{ steps.agent.outputs.has_changes }}" = "true" ]; then
+              # Branch pushed but PR blocked (e.g. Actions PR permission)
+              STATUS="COMPLETED"
             else
               STATUS="COMPLETED"
             fi
