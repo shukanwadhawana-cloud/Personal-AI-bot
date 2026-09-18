@@ -27,9 +27,6 @@ export const authOptions: NextAuthOptions = {
       return session;
     },
   },
-  pages: {
-    signIn: '/api/auth/signin',
-  },
   secret: process.env.NEXTAUTH_SECRET,
   // Secure cookies in production
   useSecureCookies: process.env.NODE_ENV === 'production',
