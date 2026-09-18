@@ -97,12 +97,13 @@ export async function POST(req: NextRequest) {
               target_branch: branch,
               prompt,
               callback_url: callbackUrl,
+              callback_token: task.workerLease,
             },
           }),
         });
 
         if (res.ok || res.status === 204) {
-          await updateTask(task.id, { status: 'QUEUED' }, auth.userId);
+          await updateTask(task.id, { status: 'RUNNING' }, auth.userId);
         } else {
           const text = await res.text().catch(() => '');
           console.error('Dispatch failed', res.status, text);
