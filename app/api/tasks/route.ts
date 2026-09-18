@@ -102,7 +102,7 @@ export async function POST(req: NextRequest) {
         });
 
         if (res.ok || res.status === 204) {
-          await updateTask(task.id, { status: 'RUNNING' }, auth.userId);
+          await updateTask(task.id, { status: 'QUEUED' }, auth.userId);
         } else {
           const text = await res.text().catch(() => '');
           console.error('Dispatch failed', res.status, text);
