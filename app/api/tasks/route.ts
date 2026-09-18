@@ -54,7 +54,7 @@ export async function POST(req: NextRequest) {
       process.env.CONTROL_PLANE_REPO || 'shukanwadhawana-cloud/Personal-AI-bot';
     // Prefer the freshly registered workflow file name.
     const workflowFile =
-      process.env.CODING_AGENT_WORKFLOW || 'coding-agent-task.yml';
+      process.env.CODING_AGENT_WORKFLOW || 'coding-agent.yml';
     const dispatchUrl = `https://api.github.com/repos/${controlPlaneRepo}/actions/workflows/${workflowFile}/dispatches`;
 
     const sessionToken = await getToken({
