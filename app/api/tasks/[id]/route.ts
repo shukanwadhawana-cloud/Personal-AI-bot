@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { appendTaskStep, getTask, updateTask } from '@/lib/tasks';
+import { appendTaskStep, getTask, getTaskWorkerLease, updateTask } from '@/lib/tasks';
 import { requireUser } from '@/lib/auth';
 
 export async function GET(
@@ -30,8 +30,12 @@ export async function PATCH(
   { params }: { params: { id: string } }
 ) {
   const secret = req.headers.get('x-worker-secret');
+  const token = req.headers.get('x-worker-token');
   const expected = process.env.WORKER_CALLBACK_SECRET;
-  const isWorker = Boolean(expected && secret && secret === expected);
+  const lease = await getTaskWorkerLease(params.id);
+  const isWorker =
+    Boolean(expected && secret && secret === expected) ||
+    Boolean(lease && token && token === lease);
 
   const auth = await requireUser();
 
