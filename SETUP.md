@@ -14,6 +14,7 @@ NEON
   → CREATE FINE-GRAINED PAT (optional but recommended)
   → VERCEL DEPLOY + ENV VARS
   → GITHUB ACTIONS SECRETS
+  → GITHUB ACTIONS SPENDING LIMIT (REQUIRED FOR PRIVATE REPOS)
   → UPDATE OAUTH CALLBACK + REDEPLOY
   → FIRST TEST ON IPHONE
 ```
@@ -53,7 +54,7 @@ Example format (do not use this value):
 6. Click **Generate a new client secret** → copy once → this is `GITHUB_SECRET`  
    (you cannot see it again)
 
-You will fix the real URLs in step 7 after Vercel gives you a domain.
+You will fix the real URLs in step 8 after Vercel gives you a domain.
 
 ---
 
@@ -89,6 +90,8 @@ The control plane needs a token that can trigger GitHub Actions on this repo.
 6. Generate → copy once → this becomes `AGENT_GITHUB_TOKEN`
 
 Goes into: **Vercel Environment Variables only** (never into Actions secrets for this purpose).
+
+For the worker to checkout/push **other** repositories, also add the same token as an **Actions repository secret** named `AGENT_GITHUB_TOKEN`.
 
 ---
 
@@ -133,7 +136,50 @@ Optional companions:
 
 ---
 
-## 7. Fix OAuth + NEXTAUTH_URL + CALLBACK_URL, then redeploy
+## 7. GitHub Actions secrets
+
+Repository → **Settings → Secrets and variables → Actions → New repository secret**
+
+| Name | Value source | Required |
+|------|--------------|----------|
+| `LLM_API_KEY` | free provider key (step 5) | Yes for real agent work |
+| `LLM_BASE_URL` | optional provider base URL | Optional |
+| `LLM_MODEL` | optional model name | Optional |
+| `WORKER_CALLBACK_SECRET` | **same value** as in Vercel (step 3) | Yes |
+| `AGENT_GITHUB_TOKEN` | same PAT as step 4 (for cross-repo checkout/push) | Recommended |
+
+Do **not** put `DATABASE_URL`, `GITHUB_SECRET`, or `NEXTAUTH_SECRET` here.
+
+`GITHUB_TOKEN` is supplied automatically by Actions — you do not create it.
+
+---
+
+## 8. GitHub Actions spending limit (REQUIRED for private repositories)
+
+This repository is **private**. GitHub-hosted runners for private repos are gated by the account **Actions spending limit**.
+
+If the spending limit is **$0** (the default for many Free accounts), every job fails **before any step runs** with:
+
+- `runner_id: 0`
+- empty `runner_name`
+- no logs
+- conclusion `failure` in a few seconds
+
+**Fix (one time):**
+
+1. Open https://github.com/settings/billing/summary  
+   (or Settings → Billing and plans → Plans and usage → Actions / Spending limits)
+2. Set the **Actions spending limit** to at least **$1** (or “No limit” if you prefer).
+3. Ensure a payment method is on file if GitHub asks for one.
+4. Wait 1–2 minutes, then re-run **Minimal Runner Test** from the Actions tab.
+
+You still get the free monthly minutes (2 000 on Free). A non-zero spending limit only allows the free entitlement to be used and covers any tiny overage.
+
+Without this step the control plane can dispatch workflows, but no runner will ever start.
+
+---
+
+## 9. Fix OAuth + NEXTAUTH_URL + CALLBACK_URL, then redeploy
 
 ### A. GitHub OAuth App
 
@@ -161,24 +207,7 @@ Vercel → Deployments → … on the latest → **Redeploy** (so the new env va
 
 ---
 
-## 8. GitHub Actions secrets
-
-Repository → **Settings → Secrets and variables → Actions → New repository secret**
-
-| Name | Value source | Required |
-|------|--------------|----------|
-| `LLM_API_KEY` | free provider key (step 5) | Yes for real agent work |
-| `LLM_BASE_URL` | optional provider base URL | Optional |
-| `LLM_MODEL` | optional model name | Optional |
-| `WORKER_CALLBACK_SECRET` | **same value** as in Vercel (step 3) | Yes |
-
-Do **not** put `DATABASE_URL`, `GITHUB_SECRET`, or `NEXTAUTH_SECRET` here.
-
-`GITHUB_TOKEN` is supplied automatically by Actions — you do not create it.
-
----
-
-## 9. First test on iPhone
+## 10. First test on iPhone
 
 1. Open `https://YOUR-DOMAIN.vercel.app` in Safari on your iPhone.
 2. Tap **Sign in with GitHub** and authorize.
@@ -208,10 +237,11 @@ Add a short section to the README titled "Architecture overview" that describes 
 | OAuth Client Secret | GitHub OAuth App | Vercel env → `GITHUB_SECRET` |
 | NEXTAUTH_SECRET | local `openssl` | Vercel env |
 | WORKER_CALLBACK_SECRET | local `openssl` | **Both** Vercel env **and** Actions secrets |
-| AGENT_GITHUB_TOKEN | GitHub fine-grained PAT | Vercel env |
+| AGENT_GITHUB_TOKEN | GitHub fine-grained PAT | Vercel env **and** Actions secrets |
 | LLM_API_KEY (+ optional BASE/MODEL) | LLM provider | **Actions secrets only** |
 | NEXTAUTH_URL / CALLBACK_URL | after Vercel domain known | Vercel env |
 | OAuth Homepage + Callback URLs | after Vercel domain known | GitHub OAuth App settings |
+| Actions spending limit | GitHub Billing | ≥ $1 for private repos |
 
 ---
 
@@ -234,3 +264,7 @@ A task is **QUEUED** until the GitHub Actions worker sends its first callback. T
 If GitHub OAuth is used for dispatch, re-authorize the app after changing its scope so the account receives the `workflow` scope. For cross-repository worker checkout/push, add the same fine-grained `AGENT_GITHUB_TOKEN` as an **Actions repository secret**; the built-in `GITHUB_TOKEN` is scoped to the control-plane repository.
 
 The worker changes a task to RUNNING only after its `Report RUNNING` callback succeeds.
+
+### Jobs fail in seconds with no logs / runner_id 0
+
+This is almost always the **Actions spending limit** on a private repository (see step 8). It is not a YAML or code defect.
