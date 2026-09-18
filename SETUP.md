@@ -225,3 +225,12 @@ npm run dev
 ```
 
 Without `DATABASE_URL` the app uses an in-memory store (development only). Production always requires Neon.
+
+
+## Dispatch troubleshooting
+
+A task is **QUEUED** until the GitHub Actions worker sends its first callback. The control plane must not mark a task RUNNING merely because GitHub accepted a workflow-dispatch request.
+
+If GitHub OAuth is used for dispatch, re-authorize the app after changing its scope so the account receives the `workflow` scope. For cross-repository worker checkout/push, add the same fine-grained `AGENT_GITHUB_TOKEN` as an **Actions repository secret**; the built-in `GITHUB_TOKEN` is scoped to the control-plane repository.
+
+The worker changes a task to RUNNING only after its `Report RUNNING` callback succeeds.
