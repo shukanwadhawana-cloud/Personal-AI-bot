@@ -7,7 +7,7 @@ export const authOptions: NextAuthOptions = {
       clientId: process.env.GITHUB_ID || '',
       clientSecret: process.env.GITHUB_SECRET || '',
       // Request identity plus repository access needed for Actions dispatch and future repo operations.
-      authorization: { params: { scope: 'read:user user:email repo' } },
+      authorization: { params: { scope: 'read:user user:email repo workflow' } },
     }),
   ],
   callbacks: {
