@@ -6,7 +6,7 @@ export const authOptions: NextAuthOptions = {
     GitHubProvider({
       clientId: process.env.GITHUB_ID || '',
       clientSecret: process.env.GITHUB_SECRET || '',
-      // Request only what we need for identity + repo listing later
+      // Request identity plus repository access needed for Actions dispatch and future repo operations.
       authorization: { params: { scope: 'read:user user:email' } },
     }),
   ],
