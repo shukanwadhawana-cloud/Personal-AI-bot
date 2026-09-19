@@ -15,6 +15,18 @@ type Task = {
 export default function Home() {
   const { data: session, status } = useSession();
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [deleting, setDeleting] = useState<string | null>(null);
+
+  async function deleteTask(id: string) {
+    if (!window.confirm('Delete this task from the dashboard? This only removes the task record.')) return;
+    setDeleting(id);
+    try {
+      const res = await fetch(`/api/tasks/${id}`, { method: 'DELETE' });
+      if (res.ok) setTasks((current) => current.filter((t) => t.id !== id));
+    } finally {
+      setDeleting(null);
+    }
+  }
 
   useEffect(() => {
     if (status !== 'authenticated') return;
@@ -78,7 +90,8 @@ export default function Home() {
         <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
           {tasks.map((t) => (
             <li key={t.id} style={{ marginBottom: 12, padding: 12, background: '#f3f4f6', borderRadius: 8 }}>
-              <a href={`/tasks/${t.id}`} style={{ textDecoration: 'none', color: 'inherit' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+              <a href={`/tasks/${t.id}`} style={{ textDecoration: 'none', color: 'inherit', flex: 1 }}>
                 <div style={{ fontWeight: 600 }}>{t.title || t.id.slice(0, 8)}</div>
                 <div style={{ fontSize: 13, color: '#555' }}>
                   {t.repository} · {t.status} · {new Date(t.createdAt).toLocaleString()}
@@ -91,6 +104,16 @@ export default function Home() {
                   </div>
                 )}
               </a>
+              <button
+                type="button"
+                onClick={() => deleteTask(t.id)}
+                disabled={deleting === t.id}
+                aria-label={`Delete ${t.title || 'task'}`}
+                style={{ alignSelf: 'flex-start', border: '1px solid #ddd', background: '#fff', color: '#b91c1c', borderRadius: 6, padding: '6px 9px', cursor: deleting === t.id ? 'wait' : 'pointer' }}
+              >
+                {deleting === t.id ? '…' : 'Delete'}
+              </button>
+              </div>
             </li>
           ))}
         </ul>
