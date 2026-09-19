@@ -16,12 +16,12 @@ const CreateTaskSchema = z.object({
 });
 
 /**
- * Prefer numeric workflow ID (most reliable for dispatch).
- * Fallback: gold-worker.yml filename.
- * Do NOT use coding-agent.yml / coding-agent-dispatch.yml — GitHub API
- * reports they lack workflow_dispatch despite YAML containing it.
+ * Gold Worker workflow — verified via GitHub Actions API to accept workflow_dispatch.
+ * Workflow ID 362081304 = .github/workflows/gold-worker.yml
+ * Do NOT use coding-agent.yml or coding-agent-dispatch.yml (GitHub returns 422
+ * "Workflow does not have workflow_dispatch trigger" for those registrations).
  */
-const DEFAULT_WORKFLOW = process.env.CODING_AGENT_WORKFLOW_ID || 'gold-worker.yml';
+const GOLD_WORKER_WORKFLOW_ID = '362081304';
 
 export async function GET() {
   const auth = await requireUser();
@@ -54,7 +54,11 @@ export async function POST(req: NextRequest) {
 
     const controlPlaneRepo =
       process.env.CONTROL_PLANE_REPO || 'shukanwadhawana-cloud/Personal-AI-bot';
-    const workflowRef = DEFAULT_WORKFLOW;
+    // Prefer env override only if set to a known-good id/path; otherwise pin to verified ID.
+    const workflowRef =
+      process.env.CODING_AGENT_WORKFLOW_ID ||
+      process.env.CODING_AGENT_WORKFLOW ||
+      GOLD_WORKER_WORKFLOW_ID;
     const dispatchUrl = `https://api.github.com/repos/${controlPlaneRepo}/actions/workflows/${workflowRef}/dispatches`;
 
     const sessionToken = await getToken({
@@ -104,6 +108,7 @@ export async function POST(req: NextRequest) {
         });
 
         if (res.ok || res.status === 204) {
+          // Stay QUEUED until the worker reports RUNNING via callback
           await updateTask(task.id, { status: 'QUEUED' }, auth.userId);
         } else {
           const responseText = await res.text().catch(() => '');
