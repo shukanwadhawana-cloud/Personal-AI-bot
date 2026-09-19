@@ -183,8 +183,12 @@ jobs:
                 npm install --no-audit --no-fund >>"$VERIFY_LOG" 2>&1 || rc=$?
               fi
               if [ "$rc" -eq 0 ] && node -e "const p=require('./package.json'); process.exit(p.scripts&&p.scripts.lint?0:1)"; then
-                echo "VERIFY: npm run lint" | tee -a "$VERIFY_LOG"
-                npm run lint >>"$VERIFY_LOG" 2>&1 || rc=$?
+                if [ -f .eslintrc.json ] || [ -f .eslintrc.js ] || [ -f eslint.config.js ] || [ -f eslint.config.mjs ]; then
+                  echo "VERIFY: npm run lint" | tee -a "$VERIFY_LOG"
+                  CI=true npm run lint >>"$VERIFY_LOG" 2>&1 || rc=$?
+                else
+                  echo "VERIFY: lint skipped (no eslint config)"
+                fi
               else
                 echo "VERIFY: lint skipped or prior fail"
               fi
