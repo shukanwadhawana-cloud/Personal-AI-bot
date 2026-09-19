@@ -45,6 +45,7 @@ export default function TaskDetailPage() {
   const [task, setTask] = useState<Task | null>(null);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
+  const [deleting, setDeleting] = useState(false);
   const statusRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -112,6 +113,18 @@ export default function TaskDetailPage() {
   }
 
   const color = STATUS_COLORS[task.status] || '#333';
+
+  async function handleDelete() {
+    if (!window.confirm('Delete this task from the dashboard? This only removes the task record.')) return;
+    setDeleting(true);
+    try {
+      const res = await fetch(`/api/tasks/${id}`, { method: 'DELETE' });
+      if (res.ok) window.location.href = '/';
+      else setDeleting(false);
+    } catch {
+      setDeleting(false);
+    }
+  }
 
   return (
     <main style={pageStyle}>
@@ -229,6 +242,10 @@ export default function TaskDetailPage() {
         <a href="/">← Dashboard</a>
         {' · '}
         <a href="/tasks/new">New task</a>
+        {' · '}
+        <button type="button" onClick={handleDelete} disabled={deleting} style={{ border: 'none', background: 'none', color: '#b91c1c', padding: 0, cursor: deleting ? 'wait' : 'pointer' }}>
+          {deleting ? 'Deleting…' : 'Delete task'}
+        </button>
       </p>
     </main>
   );
