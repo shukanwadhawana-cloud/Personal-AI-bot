@@ -1,0 +1,310 @@
+name: PAI Worker
+
+on:
+  workflow_dispatch:
+    inputs:
+      task_id:
+        description: Task ID from control plane
+        required: true
+        type: string
+      target_repo:
+        description: owner/repo to work on
+        required: true
+        type: string
+      target_branch:
+        description: Base branch
+        required: false
+        default: main
+        type: string
+      prompt:
+        description: Natural language coding instruction
+        required: true
+        type: string
+      callback_url:
+        description: Full URL to PATCH task status
+        required: true
+        type: string
+      callback_token:
+        description: Per-task callback credential
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  agent:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Validate inputs
+        env:
+          TARGET_REPO: ${{ inputs.target_repo }}
+          TASK_ID: ${{ inputs.task_id }}
+          TASK_PROMPT: ${{ inputs.prompt }}
+        run: |
+          set -euo pipefail
+          echo RUNNER_OK
+          case "$TARGET_REPO" in
+            */*) ;;
+            *) echo "Invalid repository format"; exit 1 ;;
+          esac
+          test -n "$TASK_ID"
+          test -n "$TASK_PROMPT"
+
+      - name: Report RUNNING
+        env:
+          CALLBACK_TOKEN: ${{ inputs.callback_token }}
+          CALLBACK_URL: ${{ inputs.callback_url }}
+          VERCEL_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
+          WORKER_CALLBACK_SECRET: ${{ secrets.WORKER_CALLBACK_SECRET }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -uo pipefail
+          URL="$CALLBACK_URL"
+          if [ -n "${VERCEL_BYPASS_SECRET:-}" ]; then
+            case "$URL" in
+              *\?*) URL="${URL}&x-vercel-protection-bypass=${VERCEL_BYPASS_SECRET}" ;;
+              *) URL="${URL}?x-vercel-protection-bypass=${VERCEL_BYPASS_SECRET}" ;;
+            esac
+          fi
+          HDR=(-H "Content-Type: application/json" -H "x-worker-token: ${CALLBACK_TOKEN}")
+          if [ -n "${WORKER_CALLBACK_SECRET:-}" ]; then
+            HDR+=(-H "x-worker-secret: ${WORKER_CALLBACK_SECRET}")
+          fi
+          if [ -n "${VERCEL_BYPASS_SECRET:-}" ]; then
+            HDR+=(-H "x-vercel-protection-bypass: ${VERCEL_BYPASS_SECRET}")
+          fi
+          NOW=$(date -u -Iseconds)
+          HTTP=$(curl -sS -o /tmp/cb.txt -w "%{http_code}" -X PATCH "$URL" "${HDR[@]}" \
+            -d "{\"status\":\"RUNNING\",\"workerRunId\":\"${RUN_ID}\",\"heartbeatAt\":\"${NOW}\"}" || echo 000)
+          echo "callback_http=$HTTP"
+          head -c 400 /tmp/cb.txt || true
+          echo
+
+      - name: Checkout target repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.target_repo }}
+          token: ${{ secrets.AGENT_GITHUB_TOKEN != '' && secrets.AGENT_GITHUB_TOKEN || github.token }}
+          path: workspace
+          ref: ${{ inputs.target_branch }}
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Aider
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install --quiet aider-chat
+          aider --version
+
+      - name: Load acceptance verifier
+        env:
+          GH_TOKEN: ${{ secrets.AGENT_GITHUB_TOKEN != '' && secrets.AGENT_GITHUB_TOKEN || github.token }}
+        run: |
+          set -euo pipefail
+          gh api "repos/${{ github.repository }}/contents/.github/scripts/task-acceptance-gate.py?ref=${{ github.sha }}" --jq .content | base64 --decode > /tmp/task-acceptance-gate.py
+          test -s /tmp/task-acceptance-gate.py
+          echo "acceptance_gate_ref=${{ github.sha }}"
+
+      - name: Execute agent
+        id: agent
+        env:
+          GEMINI_API_KEY: ${{ secrets.LLM_API_KEY }}
+          TASK_PROMPT: ${{ inputs.prompt }}
+          TASK_ID: ${{ inputs.task_id }}
+          GH_TOKEN: ${{ secrets.AGENT_GITHUB_TOKEN != '' && secrets.AGENT_GITHUB_TOKEN || github.token }}
+        working-directory: workspace
+        run: |
+          set -euo pipefail
+          git config user.name "Personal-AI-Bot"
+          git config user.email "bot@users.noreply.github.com"
+          if [ ! -f .gitignore ] || ! grep -q node_modules/ .gitignore 2>/dev/null; then
+            printf '\nnode_modules/\n.next/\ndist/\nbuild/\n.aider*\n.env\n.env.*\n' >> .gitignore
+          fi
+          BRANCH="agent/${TASK_ID}"
+          git fetch origin "$BRANCH" 2>/dev/null || true
+          if git show-ref --verify --quiet "refs/remotes/origin/$BRANCH"; then
+            git checkout -B "$BRANCH" "origin/$BRANCH"
+          else
+            git checkout -b "$BRANCH"
+          fi
+          test -n "${GEMINI_API_KEY:-}" || { echo "LLM_API_KEY is missing"; exit 1; }
+          MODEL="gemini/gemini-3.6-flash"
+          echo "Using model $MODEL"
+          echo "=== repository diagnostics ==="
+          echo "cwd=$(pwd)"
+          echo "git_root=$(git rev-parse --show-toplevel)"
+          echo "branch=$(git rev-parse --abbrev-ref HEAD)"
+          echo "HEAD=$(git rev-parse HEAD)"
+          echo "git_repo_detected=yes"
+          ls -la | head -n 25
+          git status --short | head -n 30 || true
+          echo "=== end diagnostics ==="
+          BASELINE_SHA=$(git rev-parse HEAD)
+          printf '%s' "$TASK_PROMPT" | aider --yes --no-auto-commits --model "$MODEL" --message-file /dev/stdin
+          acceptance_passed=0
+          for acceptance_attempt in 1 2 3; do
+            echo "=== Acceptance attempt $acceptance_attempt ==="
+            set +e
+            ACCEPTANCE_OUTPUT=$(python /tmp/task-acceptance-gate.py "$TASK_PROMPT" "$BASELINE_SHA" 2>&1)
+            acceptance_rc=$?
+            set -e
+            echo "$ACCEPTANCE_OUTPUT"
+            if [ "$acceptance_rc" -eq 0 ]; then
+              acceptance_passed=1
+              break
+            fi
+            if [ "$acceptance_attempt" -lt 3 ]; then
+              printf '%s' "Acceptance failed. Original task: $TASK_PROMPT. Evidence: $ACCEPTANCE_OUTPUT. Implement the original task in this repository." | aider --yes --no-auto-commits --model "$MODEL" --message-file /dev/stdin
+            fi
+          done
+          test "$acceptance_passed" -eq 1 || { echo "Acceptance failed after retries"; exit 1; }
+          verified=0
+          for attempt in 1 2 3; do
+            echo "=== Verification attempt $attempt ==="
+            set +e
+            rc=0
+            VERIFY_LOG="/tmp/verify-attempt-$attempt.log"
+            : > "$VERIFY_LOG"
+            if [ -f package.json ]; then
+              if [ -f package-lock.json ]; then
+                echo "VERIFY: npm ci" | tee -a "$VERIFY_LOG"
+                npm ci --no-audit --no-fund >>"$VERIFY_LOG" 2>&1 || rc=$?
+              else
+                echo "VERIFY: npm install" | tee -a "$VERIFY_LOG"
+                npm install --no-audit --no-fund >>"$VERIFY_LOG" 2>&1 || rc=$?
+              fi
+              if [ "$rc" -eq 0 ] && node -e "const p=require('./package.json'); process.exit(p.scripts&&p.scripts.lint?0:1)"; then
+                echo "VERIFY: npm run lint" | tee -a "$VERIFY_LOG"
+                npm run lint >>"$VERIFY_LOG" 2>&1 || rc=$?
+              else
+                echo "VERIFY: lint skipped or prior fail"
+              fi
+              if [ "$rc" -eq 0 ]; then
+                if node -e "const p=require('./package.json'); process.exit(p.scripts&&p.scripts.typecheck?0:1)"; then
+                  echo "VERIFY: npm run typecheck" | tee -a "$VERIFY_LOG"
+                  npm run typecheck >>"$VERIFY_LOG" 2>&1 || rc=$?
+                elif [ -f tsconfig.json ]; then
+                  echo "VERIFY: npx tsc --noEmit" | tee -a "$VERIFY_LOG"
+                  npx tsc --noEmit >>"$VERIFY_LOG" 2>&1 || rc=$?
+                else
+                  echo "VERIFY: typecheck skipped"
+                fi
+              fi
+              if [ "$rc" -eq 0 ] && node -e "const p=require('./package.json'); process.exit(p.scripts&&p.scripts.test?0:1)"; then
+                echo "VERIFY: npm test" | tee -a "$VERIFY_LOG"
+                npm test --if-present >>"$VERIFY_LOG" 2>&1 || rc=$?
+              else
+                echo "VERIFY: test skipped or prior fail"
+              fi
+              if [ "$rc" -eq 0 ] && node -e "const p=require('./package.json'); process.exit(p.scripts&&p.scripts.build?0:1)"; then
+                echo "VERIFY: npm run build" | tee -a "$VERIFY_LOG"
+                npm run build >>"$VERIFY_LOG" 2>&1 || rc=$?
+              else
+                echo "VERIFY: build skipped or prior fail"
+              fi
+            else
+              echo "VERIFY: no package.json"
+              rc=0
+            fi
+            set -e
+            if [ "$rc" -eq 0 ]; then
+              verified=1
+              break
+            fi
+            echo "VERIFY_FAILED rc=$rc"
+            tail -n 80 "$VERIFY_LOG" || true
+            if [ "$attempt" -lt 3 ]; then
+              DIAG=$(tail -n 60 "$VERIFY_LOG" | head -c 8000)
+              printf '%s' "Verification failed. Diagnostic:\n$DIAG\n\nFix verification. Preserve original task." | aider --yes --no-auto-commits --model "$MODEL" --message-file /dev/stdin || true
+            fi
+          done
+          test "$verified" -eq 1 || { echo "Verification failed after retries"; exit 1; }
+          rm -rf node_modules .next dist build .aider* 2>/dev/null || true
+          git add -A
+          git reset HEAD -- node_modules .next dist build .aider* 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "No source changes to commit"
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          git commit -m "agent(${TASK_ID}): automated changes"
+          git push -u origin "$BRANCH"
+          echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Create Pull Request
+        id: pr
+        if: steps.agent.outputs.has_changes == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.AGENT_GITHUB_TOKEN != '' && secrets.AGENT_GITHUB_TOKEN || github.token }}
+          TASK_ID: ${{ inputs.task_id }}
+          TARGET_BRANCH: ${{ inputs.target_branch }}
+        working-directory: workspace
+        run: |
+          set -euo pipefail
+          BRANCH="agent/${TASK_ID}"
+          set +e
+          OUT=$(gh pr create --base "$TARGET_BRANCH" --head "$BRANCH" --title "[Personal AI Bot] ${TASK_ID}" --body "Automated coding task ${TASK_ID}. Acceptance PASS. Verification PASS." 2>&1)
+          EC=$?
+          set -e
+          echo "$OUT"
+          PR_URL=""
+          if [ "$EC" -eq 0 ]; then
+            PR_URL=$(echo "$OUT" | grep -Eo 'https://github.com/[^ ]+' | tail -n1 || true)
+          fi
+          if [ -z "$PR_URL" ]; then
+            PR_URL=$(gh pr list --head "$BRANCH" --json url --jq '.[0].url' 2>/dev/null || true)
+          fi
+          echo "pull-request-url=$PR_URL" >> "$GITHUB_OUTPUT"
+          test -n "$PR_URL" || { echo "PR not created"; exit 1; }
+
+      - name: Report final status
+        if: always()
+        env:
+          CALLBACK_TOKEN: ${{ inputs.callback_token }}
+          CALLBACK_URL: ${{ inputs.callback_url }}
+          VERCEL_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
+          WORKER_CALLBACK_SECRET: ${{ secrets.WORKER_CALLBACK_SECRET }}
+          RUN_ID: ${{ github.run_id }}
+          JOB_STATUS: ${{ job.status }}
+          PR_URL: ${{ steps.pr.outputs.pull-request-url }}
+          COMMIT_SHA: ${{ steps.agent.outputs.commit }}
+        run: |
+          set -uo pipefail
+          STATUS=FAILED
+          if [ "$JOB_STATUS" = "success" ]; then
+            if [ -n "${PR_URL:-}" ]; then STATUS=PR_CREATED; else STATUS=COMPLETED; fi
+          fi
+          PAYLOAD=$(jq -n --arg status "$STATUS" --arg run "$RUN_ID" --arg commit "${COMMIT_SHA:-}" --arg pr "${PR_URL:-}" '{status:$status,workerRunId:$run,commitSha:$commit,prUrl:$pr}')
+          URL="$CALLBACK_URL"
+          if [ -n "${VERCEL_BYPASS_SECRET:-}" ]; then
+            case "$URL" in
+              *\?*) URL="${URL}&x-vercel-protection-bypass=${VERCEL_BYPASS_SECRET}" ;;
+              *) URL="${URL}?x-vercel-protection-bypass=${VERCEL_BYPASS_SECRET}" ;;
+            esac
+          fi
+          HDR=(-H "Content-Type: application/json" -H "x-worker-token: ${CALLBACK_TOKEN}")
+          if [ -n "${WORKER_CALLBACK_SECRET:-}" ]; then
+            HDR+=(-H "x-worker-secret: ${WORKER_CALLBACK_SECRET}")
+          fi
+          if [ -n "${VERCEL_BYPASS_SECRET:-}" ]; then
+            HDR+=(-H "x-vercel-protection-bypass: ${VERCEL_BYPASS_SECRET}")
+          fi
+          HTTP=$(curl -sS -o /tmp/final.txt -w "%{http_code}" -X PATCH "$URL" "${HDR[@]}" -d "$PAYLOAD" || echo 000)
+          echo "final_callback_http=$HTTP"
+          head -c 300 /tmp/final.txt || true
+          echo
+
+      - name: Cleanup
+        if: always()
+        run: rm -rf workspace || true
