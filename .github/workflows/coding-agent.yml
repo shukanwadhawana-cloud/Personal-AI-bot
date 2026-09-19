@@ -127,6 +127,8 @@ jobs:
           TASK_PROMPT: ${{ github.event.inputs.prompt }}
           TASK_ID: ${{ github.event.inputs.task_id }}
           GH_TOKEN: ${{ secrets.AGENT_GITHUB_TOKEN != '' && secrets.AGENT_GITHUB_TOKEN || github.token }}
+          CALLBACK_TOKEN: ${{ github.event.inputs.callback_token }}
+          CALLBACK_URL: ${{ github.event.inputs.callback_url }}
         working-directory: workspace
         shell: bash
         run: |
@@ -153,7 +155,70 @@ jobs:
           echo "LLM provider: Google Gemini API"
           MODEL="gemini/gemini-3.6-flash"
           echo "Aider model route: $MODEL"
+
+          report_step() {
+            local step_id="$1"
+            local step_status="$2"
+            local step_name="$3"
+            local detail="$4"
+            local now
+            now="$(date -u -Iseconds)"
+            jq -n --arg id "$step_id" --arg name "$step_name" --arg status "$step_status" --arg now "$now" --arg detail "$detail" \
+              '{step:{id:$id,name:$name,status:$status,startedAt:$now,completedAt:(if $status == "RUNNING" then null else $now end),detail:$detail}}' |
+              curl --fail-with-body -sS -X PATCH "$CALLBACK_URL" \
+                -H "Content-Type: application/json" -H "x-worker-token: $CALLBACK_TOKEN" -d @- || true
+          }
+
+          report_step "agent-execution" "RUNNING" "Execute coding agent" "Aider is inspecting the repository and implementing the requested change."
           printf '%s' "$TASK_PROMPT" | aider --yes --no-git --model "$MODEL" --message-file /dev/stdin
+          report_step "agent-execution" "COMPLETED" "Execute coding agent" "Aider completed the implementation pass."
+
+          report_step "verification" "RUNNING" "Verify changes" "Running the repository build/test verification when available."
+          VERIFY_EC=0
+          VERIFY_OUTPUT=""
+          if [ -f package.json ]; then
+            if [ -f package-lock.json ]; then npm ci --no-audit --no-fund; else npm install --package-lock=false --no-audit --no-fund; fi
+            if npm pkg get scripts.build --raw 2>/dev/null | grep -qxv "undefined"; then
+              set +e
+              VERIFY_OUTPUT="$(npm run build 2>&1)"
+              VERIFY_EC=$?
+              set -e
+            elif npm pkg get scripts.test --raw 2>/dev/null | grep -qxv "undefined"; then
+              set +e
+              VERIFY_OUTPUT="$(npm test 2>&1)"
+              VERIFY_EC=$?
+              set -e
+            else
+              VERIFY_OUTPUT="No build/test script declared."
+            fi
+          else
+            VERIFY_OUTPUT="No package.json; no generic Node verification was applicable."
+          fi
+
+          if [ "$VERIFY_EC" -ne 0 ]; then
+            report_step "verification" "FAILED" "Verify changes" "Verification failed; Aider will receive the actual failure output for a repair pass."
+            printf '%s\n\n%s\n%s' "Fix the implementation based on this verification failure. Inspect the repository, make the necessary changes, then finish only after the relevant verification passes." "VERIFICATION EXIT CODE: $VERIFY_EC" "$VERIFY_OUTPUT" | aider --yes --no-git --model "$MODEL" --message-file /dev/stdin
+
+            set +e
+            if [ -f package.json ]; then
+              if [ -f package-lock.json ]; then npm ci --no-audit --no-fund >/tmp/agent-install.log 2>&1; else npm install --package-lock=false --no-audit --no-fund >/tmp/agent-install.log 2>&1; fi
+              if npm pkg get scripts.build --raw 2>/dev/null | grep -qxv "undefined"; then
+                VERIFY_OUTPUT="$(npm run build 2>&1)"; VERIFY_EC=$?
+              elif npm pkg get scripts.test --raw 2>/dev/null | grep -qxv "undefined"; then
+                VERIFY_OUTPUT="$(npm test 2>&1)"; VERIFY_EC=$?
+              else
+                VERIFY_EC=0
+              fi
+            fi
+            set -e
+          fi
+
+          if [ "$VERIFY_EC" -ne 0 ]; then
+            report_step "verification" "FAILED" "Verify changes" "Verification still fails after the repair pass."
+            echo "$VERIFY_OUTPUT"
+            exit 1
+          fi
+          report_step "verification" "COMPLETED" "Verify changes" "Automated verification passed."
 
           git add -A
           if git diff --cached --quiet; then
