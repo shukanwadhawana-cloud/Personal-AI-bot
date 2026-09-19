@@ -241,6 +241,19 @@ export async function appendTaskStep(
   return updateTask(id, { steps });
 }
 
+export async function deleteTask(id: string, userId: string): Promise<boolean> {
+  const db = getSql();
+  if (db) {
+    await ensureSchema();
+    const result = await db`DELETE FROM tasks WHERE id = ${id} AND user_id = ${userId} RETURNING id`;
+    return Array.isArray(result) && result.length > 0;
+  }
+  const existing = _store.get(id);
+  if (!existing || existing.userId !== userId) return false;
+  _store.delete(id);
+  return true;
+}
+
 /** Soft cleanup of old completed tasks (called by scheduled job or on demand) */
 export async function cleanupOldTasks(days = 30): Promise<number> {
   const db = getSql();
