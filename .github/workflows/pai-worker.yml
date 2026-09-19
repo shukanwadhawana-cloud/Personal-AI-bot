@@ -116,6 +116,7 @@ jobs:
           set -euo pipefail
           gh api "repos/${{ github.repository }}/contents/.github/scripts/task-acceptance-gate.py?ref=${{ github.sha }}" --jq .content | base64 --decode > /tmp/task-acceptance-gate.py
           test -s /tmp/task-acceptance-gate.py
+          echo "acceptance_gate_ref=${{ github.sha }}"
 
       - name: Execute agent
         id: agent
@@ -150,8 +151,26 @@ jobs:
           MODEL="gemini/gemini-3.6-flash"
           echo "Using model $MODEL"
 
+          # --- Repository diagnostics (no secrets) ---
+          echo "=== repository diagnostics ==="
+          echo "cwd=$(pwd)"
+          echo "git_root=$(git rev-parse --show-toplevel)"
+          echo "branch=$(git rev-parse --abbrev-ref HEAD)"
+          echo "HEAD=$(git rev-parse HEAD)"
+          echo "git_repo_detected=yes"
+          ls -la | head -n 30
+          git status --short | head -n 40 || true
+          echo "=== end diagnostics ==="
+
+          # Aider: Git-aware for repo map/context; worker owns final commit/push.
+          # --no-auto-commits keeps commits under workflow control.
+          # Do NOT use --no-git (that yields "Git repo: none" / "Repo-map: disabled").
+          run_aider() {
+            printf '%s' "$1" | aider --yes --no-auto-commits --model "$MODEL" --message-file /dev/stdin
+          }
+
           BASELINE_SHA=$(git rev-parse HEAD)
-          printf '%s' "$TASK_PROMPT" | aider --yes --no-git --model "$MODEL" --message-file /dev/stdin
+          run_aider "$TASK_PROMPT"
 
           acceptance_attempt=1
           acceptance_max_attempts=3
@@ -168,7 +187,7 @@ jobs:
               break
             fi
             if [ "$acceptance_attempt" -lt "$acceptance_max_attempts" ]; then
-              printf '%s\n' "Acceptance failed. Original task: $TASK_PROMPT. Evidence: $ACCEPTANCE_OUTPUT. Implement the original task." | aider --yes --no-git --model "$MODEL" --message-file /dev/stdin
+              run_aider "Acceptance failed. Original task: $TASK_PROMPT. Evidence: $ACCEPTANCE_OUTPUT. Implement the original task in this repository."
             fi
             acceptance_attempt=$((acceptance_attempt + 1))
           done
@@ -185,32 +204,78 @@ jobs:
             echo "=== Verification attempt $attempt ==="
             set +e
             rc=0
+            VERIFY_LOG="/tmp/verify-attempt-$attempt.log"
+            : > "$VERIFY_LOG"
             if [ -f package.json ]; then
               if [ -f package-lock.json ]; then
-                npm ci --no-audit --no-fund || rc=$?
+                echo "VERIFY: npm ci" | tee -a "$VERIFY_LOG"
+                npm ci --no-audit --no-fund >>"$VERIFY_LOG" 2>&1 || rc=$?
               else
-                npm install --no-audit --no-fund || rc=$?
+                echo "VERIFY: npm install" | tee -a "$VERIFY_LOG"
+                npm install --no-audit --no-fund >>"$VERIFY_LOG" 2>&1 || rc=$?
               fi
+
+              has_script() {
+                node -e "const p=require('./package.json'); process.exit(p.scripts && p.scripts['$1'] ? 0 : 1)"
+              }
+
               if [ "$rc" -eq 0 ]; then
-                if node -e "const p=require('./package.json'); process.exit(p.scripts && p.scripts.test ? 0 : 1)"; then
-                  npm test --if-present || rc=$?
+                if has_script lint; then
+                  echo "VERIFY: npm run lint" | tee -a "$VERIFY_LOG"
+                  npm run lint >>"$VERIFY_LOG" 2>&1 || rc=$?
+                else
+                  echo "VERIFY: lint skipped (no script)"
                 fi
               fi
+
               if [ "$rc" -eq 0 ]; then
-                if node -e "const p=require('./package.json'); process.exit(p.scripts && p.scripts.build ? 0 : 1)"; then
-                  npm run build --if-present || rc=$?
+                if has_script typecheck; then
+                  echo "VERIFY: npm run typecheck" | tee -a "$VERIFY_LOG"
+                  npm run typecheck >>"$VERIFY_LOG" 2>&1 || rc=$?
+                elif [ -f tsconfig.json ] && command -v npx >/dev/null 2>&1; then
+                  echo "VERIFY: npx tsc --noEmit" | tee -a "$VERIFY_LOG"
+                  npx tsc --noEmit >>"$VERIFY_LOG" 2>&1 || rc=$?
+                else
+                  echo "VERIFY: typecheck skipped (no script/tsconfig)"
+                fi
+              fi
+
+              if [ "$rc" -eq 0 ]; then
+                if has_script test; then
+                  echo "VERIFY: npm test" | tee -a "$VERIFY_LOG"
+                  npm test --if-present >>"$VERIFY_LOG" 2>&1 || rc=$?
+                else
+                  echo "VERIFY: test skipped (no script)"
+                fi
+              fi
+
+              if [ "$rc" -eq 0 ]; then
+                if has_script build; then
+                  echo "VERIFY: npm run build" | tee -a "$VERIFY_LOG"
+                  npm run build >>"$VERIFY_LOG" 2>&1 || rc=$?
+                else
+                  echo "VERIFY: build skipped (no script)"
                 fi
               fi
             else
+              echo "VERIFY: no package.json — skipping node verification"
               rc=0
             fi
             set -e
+
             if [ "$rc" -eq 0 ]; then
               verified=1
               break
             fi
+
+            echo "VERIFY_FAILED rc=$rc"
+            tail -n 80 "$VERIFY_LOG" || true
             if [ "$attempt" -lt "$max_attempts" ]; then
-              printf '%s\n' "Verification failed. Fix install/test/build." | aider --yes --no-git --model "$MODEL" --message-file /dev/stdin || true
+              DIAG=$(tail -n 60 "$VERIFY_LOG" | head -c 8000)
+              run_aider "Verification failed (install/lint/typecheck/test/build). Diagnostic output:
+$DIAG
+
+Fix the repository so verification passes. Preserve the original task." || true
             fi
             attempt=$((attempt + 1))
           done

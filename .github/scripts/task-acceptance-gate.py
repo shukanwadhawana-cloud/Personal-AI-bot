@@ -5,8 +5,9 @@ Fails when the agent produced no meaningful work, or when paths the prompt
 explicitly asked to create/modify/delete are missing, or when exact-content
 requirements are not met.
 
-Does NOT treat repository identifiers (owner/repo), URLs, or contextual
-phrases (e.g. verification/acceptance process) as required changed paths.
+Does NOT treat repository identifiers (owner/repo), URLs, or conceptual
+slash phrases (e.g. page/route, API/data-access, verification/acceptance)
+as required filesystem paths.
 """
 from __future__ import annotations
 
@@ -14,7 +15,7 @@ import os
 import re
 import subprocess
 import sys
-from typing import Iterable, List, Optional, Sequence, Set, Tuple
+from typing import List, Optional, Sequence, Set, Tuple
 
 HOUSEKEEPING_NAMES = {
     ".gitignore",
@@ -36,13 +37,11 @@ HOUSEKEEPING_PREFIXES = (
     "node_modules/",
 )
 
-# owner/repo style identifiers (GitHub repo refs), not filesystem paths.
 OWNER_REPO_RE = re.compile(
     r"^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}/"
     r"[A-Za-z0-9._-]{1,100}$"
 )
 
-# Words that often appear in process language, not path segments to edit.
 CONTEXTUAL_SEGMENT_BLOCKLIST = {
     "verification",
     "acceptance",
@@ -61,7 +60,39 @@ CONTEXTUAL_SEGMENT_BLOCKLIST = {
     "deployment",
     "production",
     "staging",
+    "page",
+    "route",
+    "api",
+    "ui",
+    "data",
+    "access",
+    "control",
+    "plane",
+    "worker",
+    "run",
+    "task",
+    "application",
+    "feature",
+    "logic",
+    "service",
+    "backend",
+    "frontend",
 }
+
+# Unquoted extension-less paths must start with a known source root.
+KNOWN_SOURCE_ROOTS = (
+    "src/",
+    "app/",
+    "lib/",
+    "tests/",
+    "test/",
+    "__tests__/",
+    "pages/",
+    "components/",
+    "scripts/",
+    "packages/",
+    ".github/",
+)
 
 IMPLEMENTATION_VERBS = re.compile(
     r"\b(add|create|implement|build|fix|update|refactor|remove|delete|replace|"
@@ -75,33 +106,29 @@ EXPLICIT_CODE_INTENT = re.compile(
     re.I,
 )
 
-# Verb ... path  OR  path ... verb  within a short window.
+# Prefer paths with file extensions. Extension-less only via quoted/backtick or known roots.
 EXPLICIT_PATH_REQUEST_RE = re.compile(
     r"(?:"
     r"(?:\b(?:add|create|implement|build|fix|update|refactor|remove|delete|replace|"
     r"modify|change|make|write|edit|touch)\b[^\n.]{0,80}?)"
     r"(?:`([^`\n]+)`|\"([^\"\n]+)\"|'([^'\n]+)'|"
-    r"(?P<path1>(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.[A-Za-z0-9_.-]+|"
-    r"(?:[A-Za-z0-9_.-]+/){1,}[A-Za-z0-9_.-]+))"
+    r"(?P<path1>(?:[A-Za-z0-9_.\[\]-]+/)*[A-Za-z0-9_.\[\]-]+\.[A-Za-z0-9_.-]+))"
     r"|"
     r"(?:`([^`\n]+)`|\"([^\"\n]+)\"|'([^'\n]+)'|"
-    r"(?P<path2>(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.[A-Za-z0-9_.-]+|"
-    r"(?:[A-Za-z0-9_.-]+/){1,}[A-Za-z0-9_.-]+))"
+    r"(?P<path2>(?:[A-Za-z0-9_.\[\]-]+/)*[A-Za-z0-9_.\[\]-]+\.[A-Za-z0-9_.-]+))"
     r"[^\n.]{0,40}?\b(?:add|create|implement|build|fix|update|refactor|remove|delete|"
     r"replace|modify|change|make|write|edit)\b"
     r")",
     re.I,
 )
 
-# "file named X" / "named X" / "file X containing"
 NAMED_FILE_RE = re.compile(
     r"\b(?:file\s+named|named|file)\s+[`\"']?"
-    r"(?P<name>(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.[A-Za-z0-9_.-]+)"
+    r"(?P<name>(?:[A-Za-z0-9_.\[\]-]+/)*[A-Za-z0-9_.\[\]-]+\.[A-Za-z0-9_.-]+)"
     r"[`\"']?",
     re.I,
 )
 
-# Exact content: containing exactly: <text>  or  containing exactly the line: <text>
 EXACT_CONTENT_RE = re.compile(
     r"(?:containing|with)\s+exactly(?:\s+the\s+(?:single\s+)?line)?\s*:?\s*"
     r"(?:[`\"'](?P<q>.+?)[`\"']|(?P<plain>.+?))"
@@ -133,30 +160,42 @@ def is_owner_repo(token: str) -> bool:
     if not t or t.count("/") != 1:
         return False
     if re.search(r"\.[A-Za-z0-9]{1,10}$", t.split("/", 1)[1]):
-        # looks like path/to/file.ext — not owner/repo
         return False
     return bool(OWNER_REPO_RE.match(t))
 
 
-def is_contextual_phrase_path(token: str) -> bool:
-    """True for process language like verification/acceptance, not real files."""
+def has_file_extension(token: str) -> bool:
+    base = token.rstrip("/").rsplit("/", 1)[-1]
+    return bool(re.search(r"\.[A-Za-z0-9]{1,15}$", base))
+
+
+def is_conceptual_slash_phrase(token: str) -> bool:
+    """True for prose like page/route, API/data-access, UI/page/API."""
     t = token.strip().strip("/").strip("`\"'").lower()
     if not t or "/" not in t:
         return False
-    # Has a file extension → treat as a real path candidate.
-    if re.search(r"\.[A-Za-z0-9]{1,15}$", t):
+    if has_file_extension(t):
+        return False
+    if any(t.startswith(root) or f"/{root}" in f"/{t}" for root in KNOWN_SOURCE_ROOTS):
         return False
     segments = [s for s in t.split("/") if s]
     if not segments:
         return True
-    # If every segment is a known contextual word, ignore.
     if all(s in CONTEXTUAL_SEGMENT_BLOCKLIST for s in segments):
         return True
-    # Two-segment phrases where both look like English process words (no dots).
-    if len(segments) <= 3 and all(re.fullmatch(r"[a-z][a-z-]{1,24}", s) for s in segments):
+    # English-ish short segments without dots → treat as conceptual language.
+    if len(segments) <= 4 and all(
+        re.fullmatch(r"[a-z][a-z0-9-]{0,24}", s) for s in segments
+    ):
         if any(s in CONTEXTUAL_SEGMENT_BLOCKLIST for s in segments):
             return True
+        # All-lowercase multi-segment with no known root and no extension → conceptual.
+        return True
     return False
+
+
+def is_contextual_phrase_path(token: str) -> bool:
+    return is_conceptual_slash_phrase(token)
 
 
 def looks_like_url(token: str) -> bool:
@@ -167,24 +206,30 @@ def looks_like_url(token: str) -> bool:
 def normalize_path(token: str) -> str:
     t = token.strip().strip("`\"'").strip()
     t = t.strip(".",).strip()
-    # Drop trailing punctuation left from prose.
     t = re.sub(r"[,:;]+$", "", t)
     return t.replace("\\", "/")
 
 
+def is_plausible_filesystem_path(path: str) -> bool:
+    if not path:
+        return False
+    if looks_like_url(path) or is_owner_repo(path) or is_conceptual_slash_phrase(path):
+        return False
+    if has_file_extension(path):
+        return True
+    # Extension-less: only accept under known source roots.
+    lower = path.lower()
+    return any(lower.startswith(root) for root in KNOWN_SOURCE_ROOTS)
+
+
 def extract_explicit_required_paths(prompt: str) -> Set[str]:
-    """Paths the prompt explicitly asks to create/modify/delete."""
     required: Set[str] = set()
 
     for m in EXPLICIT_PATH_REQUEST_RE.finditer(prompt):
         groups = [g for g in m.groups() if g]
         for g in groups:
             path = normalize_path(g)
-            if not path or "/" not in path and "." not in path:
-                # bare words without extension are weak; still allow named files via NAMED_FILE_RE
-                if "." not in path:
-                    continue
-            if looks_like_url(path) or is_owner_repo(path) or is_contextual_phrase_path(path):
+            if not is_plausible_filesystem_path(path):
                 continue
             required.add(path)
 
@@ -192,9 +237,8 @@ def extract_explicit_required_paths(prompt: str) -> Set[str]:
         path = normalize_path(m.group("name") or "")
         if not path:
             continue
-        if looks_like_url(path) or is_owner_repo(path) or is_contextual_phrase_path(path):
+        if not is_plausible_filesystem_path(path):
             continue
-        # Require a create/modify verb somewhere in the prompt for this named file.
         if IMPLEMENTATION_VERBS.search(prompt):
             required.add(path)
 
@@ -202,7 +246,6 @@ def extract_explicit_required_paths(prompt: str) -> Set[str]:
 
 
 def extract_exact_content_requirement(prompt: str) -> Optional[Tuple[Optional[str], str]]:
-    """Return (optional filename, expected content) when the prompt demands exact text."""
     named = None
     nm = NAMED_FILE_RE.search(prompt)
     if nm:
@@ -212,8 +255,6 @@ def extract_exact_content_requirement(prompt: str) -> Optional[Tuple[Optional[st
     if not m:
         return None
     content = (m.group("q") or m.group("plain") or "").strip()
-    # Trim a trailing period that is sentence punctuation, not part of content,
-    # only when content clearly ends with prose punctuation and prompt continues.
     if not content:
         return None
     return named, content
@@ -253,7 +294,6 @@ def evaluate(
     file_contents: Optional[dict] = None,
     cwd: Optional[str] = None,
 ) -> Tuple[bool, List[str], dict]:
-    """Core gate. Returns (passed, reasons, diagnostics)."""
     changed_list = sorted({p.replace("\\", "/") for p in changed if p})
     implementation, housekeeping = classify_changes(changed_list)
     required_paths = extract_explicit_required_paths(prompt)
@@ -286,7 +326,6 @@ def evaluate(
             "The task requests implementation work but the working tree is unchanged."
         )
 
-    # Exact content checks (when prompt demands exact text).
     exact = extract_exact_content_requirement(prompt)
     if exact is not None:
         fname, expected = exact
@@ -308,7 +347,6 @@ def evaluate(
             if raw is None:
                 continue
             checked.append(c)
-            # Normalize trailing newlines for comparison.
             got = raw.rstrip("\n")
             exp = expected.rstrip("\n")
             if got == exp or raw == expected or raw.strip() == expected.strip():
@@ -317,9 +355,7 @@ def evaluate(
 
         if not content_ok:
             target = fname or (",".join(checked[:3]) if checked else "(no candidate file)")
-            reasons.append(
-                f"Exact content requirement not met for {target}."
-            )
+            reasons.append(f"Exact content requirement not met for {target}.")
 
     diagnostics = {
         "changed": changed_list,
