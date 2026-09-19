@@ -46,10 +46,13 @@ jobs:
           TASK_PROMPT: ${{ inputs.prompt }}
         run: |
           set -euo pipefail
-          echo "RUNNER_OK"
-          [[ "$TARGET_REPO" =~ ^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$ ]] || { echo "Invalid repository format"; exit 1; }
-          [[ "$TASK_ID" =~ ^[a-zA-Z0-9_-]+$ ]] || { echo "Invalid task_id"; exit 1; }
-          [[ -n "$TASK_PROMPT" ]] || { echo "prompt required"; exit 1; }
+          echo RUNNER_OK
+          case "$TARGET_REPO" in
+            */*) ;;
+            *) echo "Invalid repository format"; exit 1 ;;
+          esac
+          test -n "$TASK_ID"
+          test -n "$TASK_PROMPT"
 
       - name: Report RUNNING
         env:
@@ -57,25 +60,31 @@ jobs:
           CALLBACK_URL: ${{ inputs.callback_url }}
           VERCEL_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
           WORKER_CALLBACK_SECRET: ${{ secrets.WORKER_CALLBACK_SECRET }}
+          RUN_ID: ${{ github.run_id }}
         run: |
           set -uo pipefail
           URL="$CALLBACK_URL"
           if [ -n "${VERCEL_BYPASS_SECRET:-}" ]; then
-            if [[ "$URL" == *\?* ]]; then
-              URL="${URL}&x-vercel-protection-bypass=${VERCEL_BYPASS_SECRET}"
-            else
-              URL="${URL}?x-vercel-protection-bypass=${VERCEL_BYPASS_SECRET}"
-            fi
+            sep='?'
+            case "$URL" in
+              *\?*) sep='&' ;;
+            esac
+            URL="${URL}${sep}x-vercel-protection-bypass=${VERCEL_BYPASS_SECRET}"
           fi
-          ARGS=(-H "Content-Type: application/json" -H "x-worker-token: ${CALLBACK_TOKEN}")
+          ARGS="-H Content-Type: application/json -H x-worker-token: ${CALLBACK_TOKEN}"
+          extra=()
           if [ -n "${WORKER_CALLBACK_SECRET:-}" ]; then
-            ARGS+=(-H "x-worker-secret: ${WORKER_CALLBACK_SECRET}")
+            extra+=(-H "x-worker-secret: ${WORKER_CALLBACK_SECRET}")
           fi
           if [ -n "${VERCEL_BYPASS_SECRET:-}" ]; then
-            ARGS+=(-H "x-vercel-protection-bypass: ${VERCEL_BYPASS_SECRET}")
+            extra+=(-H "x-vercel-protection-bypass: ${VERCEL_BYPASS_SECRET}")
           fi
-          HTTP=$(curl -sS -o /tmp/cb.txt -w "%{http_code}" -X PATCH "$URL" "${ARGS[@]}" \
-            -d "{\"status\":\"RUNNING\",\"workerRunId\":\"${{ github.run_id }}\",\"heartbeatAt\":\"$(date -u -Iseconds)\"}" || echo "000")
+          NOW=$(date -u -Iseconds)
+          HTTP=$(curl -sS -o /tmp/cb.txt -w "%{http_code}" -X PATCH "$URL" \
+            -H "Content-Type: application/json" \
+            -H "x-worker-token: ${CALLBACK_TOKEN}" \
+            "${extra[@]}" \
+            -d "{\"status\":\"RUNNING\",\"workerRunId\":\"${RUN_ID}\",\"heartbeatAt\":\"${NOW}\"}" || echo 000)
           echo "callback_http=$HTTP"
           head -c 400 /tmp/cb.txt || true
           echo
@@ -92,7 +101,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: "3.12"
 
       - name: Install Aider
         run: |
@@ -106,7 +115,7 @@ jobs:
           GH_TOKEN: ${{ secrets.AGENT_GITHUB_TOKEN != '' && secrets.AGENT_GITHUB_TOKEN || github.token }}
         run: |
           set -euo pipefail
-          gh api "repos/${{ github.repository }}/contents/.github/scripts/task-acceptance-gate.py?ref=${{ github.sha }}" --jq '.content' | base64 --decode > /tmp/task-acceptance-gate.py
+          gh api "repos/${{ github.repository }}/contents/.github/scripts/task-acceptance-gate.py?ref=${{ github.sha }}" --jq .content | base64 --decode > /tmp/task-acceptance-gate.py
           test -s /tmp/task-acceptance-gate.py
 
       - name: Execute agent
@@ -116,17 +125,13 @@ jobs:
           TASK_PROMPT: ${{ inputs.prompt }}
           TASK_ID: ${{ inputs.task_id }}
           GH_TOKEN: ${{ secrets.AGENT_GITHUB_TOKEN != '' && secrets.AGENT_GITHUB_TOKEN || github.token }}
-          CALLBACK_TOKEN: ${{ inputs.callback_token }}
-          CALLBACK_URL: ${{ inputs.callback_url }}
-          VERCEL_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
-          WORKER_CALLBACK_SECRET: ${{ secrets.WORKER_CALLBACK_SECRET }}
         working-directory: workspace
         run: |
           set -euo pipefail
           git config user.name "Personal-AI-Bot"
           git config user.email "bot@users.noreply.github.com"
 
-          if [ ! -f .gitignore ] || ! grep -q 'node_modules/' .gitignore 2>/dev/null; then
+          if [ ! -f .gitignore ] || ! grep -q node_modules/ .gitignore 2>/dev/null; then
             printf '\nnode_modules/\n.next/\ndist/\nbuild/\n.aider*\n.env\n.env.*\n' >> .gitignore
           fi
 
@@ -146,44 +151,32 @@ jobs:
           MODEL="gemini/gemini-3.6-flash"
           echo "Using model $MODEL"
 
-          BASELINE_SHA="$(git rev-parse HEAD)"
+          BASELINE_SHA=$(git rev-parse HEAD)
           printf '%s' "$TASK_PROMPT" | aider --yes --no-git --model "$MODEL" --message-file /dev/stdin
 
           acceptance_attempt=1
           acceptance_max_attempts=3
           acceptance_passed=0
           while [ "$acceptance_attempt" -le "$acceptance_max_attempts" ]; do
-            echo "=== Acceptance-criteria attempt $acceptance_attempt ==="
+            echo "=== Acceptance attempt $acceptance_attempt ==="
             set +e
-            ACCEPTANCE_OUTPUT="$(python /tmp/task-acceptance-gate.py "$TASK_PROMPT" "$BASELINE_SHA" 2>&1)"
+            ACCEPTANCE_OUTPUT=$(python /tmp/task-acceptance-gate.py "$TASK_PROMPT" "$BASELINE_SHA" 2>&1)
             acceptance_rc=$?
             set -e
             echo "$ACCEPTANCE_OUTPUT"
-
             if [ "$acceptance_rc" -eq 0 ]; then
               acceptance_passed=1
               break
             fi
-
             if [ "$acceptance_attempt" -lt "$acceptance_max_attempts" ]; then
-              echo "Acceptance gate failed; requesting remediation"
-              ACCEPTANCE_CONTEXT="$(printf '%s\n' "$ACCEPTANCE_OUTPUT" | tail -n 120 | head -c 12000)"
-              REMEDIATION_PROMPT="The implementation FAILED the task-output acceptance gate.
-
-Original task:
-$TASK_PROMPT
-
-Acceptance-gate evidence:
-$ACCEPTANCE_CONTEXT
-
-Implement the ORIGINAL task materially. Do not only change .gitignore, lockfiles, or generated files."
-              printf '%s' "$REMEDIATION_PROMPT" | aider --yes --no-git --model "$MODEL" --message-file /dev/stdin
+              echo "Acceptance failed; remediation"
+              printf '%s\n' "The implementation failed the acceptance gate. Original task: $TASK_PROMPT. Evidence: $ACCEPTANCE_OUTPUT. Implement the original task materially." | aider --yes --no-git --model "$MODEL" --message-file /dev/stdin
             fi
             acceptance_attempt=$((acceptance_attempt + 1))
           done
 
           if [ "$acceptance_passed" -ne 1 ]; then
-            echo "Acceptance criteria gate failed after $acceptance_max_attempts attempts"
+            echo "Acceptance failed after retries"
             exit 1
           fi
 
@@ -211,25 +204,21 @@ Implement the ORIGINAL task materially. Do not only change .gitignore, lockfiles
                 fi
               fi
             else
-              echo "No package.json — skipping node verification"
               rc=0
             fi
             set -e
-
             if [ "$rc" -eq 0 ]; then
               verified=1
               break
             fi
-
             if [ "$attempt" -lt "$max_attempts" ]; then
-              echo "Verification failed; requesting repair"
-              printf '%s\n' "The verification failed. Fix the repository so install/test/build pass. Preserve the original task." | aider --yes --no-git --model "$MODEL" --message-file /dev/stdin || true
+              printf '%s\n' "Verification failed. Fix the repository so install/test/build pass." | aider --yes --no-git --model "$MODEL" --message-file /dev/stdin || true
             fi
             attempt=$((attempt + 1))
           done
 
           if [ "$verified" -ne 1 ]; then
-            echo "Verification failed after $max_attempts attempts"
+            echo "Verification failed after retries"
             exit 1
           fi
 
@@ -261,16 +250,7 @@ Implement the ORIGINAL task materially. Do not only change .gitignore, lockfiles
           set -euo pipefail
           BRANCH="agent/${TASK_ID}"
           set +e
-          OUT=$(gh pr create --base "$TARGET_BRANCH" --head "$BRANCH" \
-            --title "[Personal AI Bot] ${TASK_ID}" \
-            --body "## Automated coding task
-
-**Task ID:** \"${TASK_ID}\"
-
-**Acceptance:** PASS
-**Verification:** PASS
-
-Generated by Personal AI Agent workflow." 2>&1)
+          OUT=$(gh pr create --base "$TARGET_BRANCH" --head "$BRANCH" --title "[Personal AI Bot] ${TASK_ID}" --body "Automated coding task ${TASK_ID}. Acceptance PASS. Verification PASS." 2>&1)
           EC=$?
           set -e
           echo "$OUT"
@@ -283,7 +263,7 @@ Generated by Personal AI Agent workflow." 2>&1)
           fi
           echo "pull-request-url=$PR_URL" >> "$GITHUB_OUTPUT"
           if [ -z "$PR_URL" ]; then
-            echo "PR not created. Enable Actions permission to create PRs or set AGENT_GITHUB_TOKEN."
+            echo "PR not created"
             exit 1
           fi
 
@@ -294,38 +274,37 @@ Generated by Personal AI Agent workflow." 2>&1)
           CALLBACK_URL: ${{ inputs.callback_url }}
           VERCEL_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
           WORKER_CALLBACK_SECRET: ${{ secrets.WORKER_CALLBACK_SECRET }}
+          RUN_ID: ${{ github.run_id }}
+          JOB_STATUS: ${{ job.status }}
+          PR_URL: ${{ steps.pr.outputs.pull-request-url }}
+          COMMIT_SHA: ${{ steps.agent.outputs.commit }}
         run: |
           set -uo pipefail
-          STATUS="FAILED"
-          if [ "${{ job.status }}" = "success" ]; then
-            if [ -n "${{ steps.pr.outputs.pull-request-url }}" ]; then
-              STATUS="PR_CREATED"
-            else
-              STATUS="COMPLETED"
-            fi
+          STATUS=FAILED
+          if [ "$JOB_STATUS" = "success" ]; then
+            if [ -n "${PR_URL:-}" ]; then STATUS=PR_CREATED; else STATUS=COMPLETED; fi
           fi
-          PAYLOAD=$(jq -n \
-            --arg status "$STATUS" \
-            --arg run "${{ github.run_id }}" \
-            --arg commit "${{ steps.agent.outputs.commit }}" \
-            --arg pr "${{ steps.pr.outputs.pull-request-url }}" \
-            '{status:$status,workerRunId:$run,commitSha:$commit,prUrl:$pr}')
+          PAYLOAD=$(jq -n --arg status "$STATUS" --arg run "$RUN_ID" --arg commit "${COMMIT_SHA:-}" --arg pr "${PR_URL:-}" '{status:$status,workerRunId:$run,commitSha:$commit,prUrl:$pr}')
           URL="$CALLBACK_URL"
           if [ -n "${VERCEL_BYPASS_SECRET:-}" ]; then
-            if [[ "$URL" == *\?* ]]; then
-              URL="${URL}&x-vercel-protection-bypass=${VERCEL_BYPASS_SECRET}"
-            else
-              URL="${URL}?x-vercel-protection-bypass=${VERCEL_BYPASS_SECRET}"
-            fi
+            sep='?'
+            case "$URL" in
+              *\?*) sep='&' ;;
+            esac
+            URL="${URL}${sep}x-vercel-protection-bypass=${VERCEL_BYPASS_SECRET}"
           fi
-          ARGS=(-H "Content-Type: application/json" -H "x-worker-token: ${CALLBACK_TOKEN}")
+          extra=()
           if [ -n "${WORKER_CALLBACK_SECRET:-}" ]; then
-            ARGS+=(-H "x-worker-secret: ${WORKER_CALLBACK_SECRET}")
+            extra+=(-H "x-worker-secret: ${WORKER_CALLBACK_SECRET}")
           fi
           if [ -n "${VERCEL_BYPASS_SECRET:-}" ]; then
-            ARGS+=(-H "x-vercel-protection-bypass: ${VERCEL_BYPASS_SECRET}")
+            extra+=(-H "x-vercel-protection-bypass: ${VERCEL_BYPASS_SECRET}")
           fi
-          HTTP=$(curl -sS -o /tmp/final.txt -w "%{http_code}" -X PATCH "$URL" "${ARGS[@]}" -d "$PAYLOAD" || echo "000")
+          HTTP=$(curl -sS -o /tmp/final.txt -w "%{http_code}" -X PATCH "$URL" \
+            -H "Content-Type: application/json" \
+            -H "x-worker-token: ${CALLBACK_TOKEN}" \
+            "${extra[@]}" \
+            -d "$PAYLOAD" || echo 000)
           echo "final_callback_http=$HTTP"
           head -c 300 /tmp/final.txt || true
           echo
