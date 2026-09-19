@@ -166,10 +166,18 @@ jobs:
             local args=(-H "Content-Type: application/json" -H "x-worker-token: ${CALLBACK_TOKEN}")
             if [ -n "${WORKER_CALLBACK_SECRET:-}" ]; then args+=(-H "x-worker-secret: ${WORKER_CALLBACK_SECRET}"); fi
             if [ -n "${VERCEL_BYPASS_SECRET:-}" ]; then args+=(-H "x-vercel-protection-bypass: ${VERCEL_BYPASS_SECRET}"); fi
-            curl -sS -X PATCH "$url" "${args[@]}" -d "$payload" >/dev/null || true
+            for attempt in 1 2 3 4 5; do
+            http=$(curl -sS -o /tmp/cb_retry.txt -w "%{http_code}" -X PATCH "$url" "${args[@]}" -d "$payload" || echo "000")
+            echo "callback_http=$http attempt=$attempt"
+            if [[ "$http" =~ ^2[0-9][0-9]$ ]]; then return 0; fi
+            sleep $((attempt * 2))
+          done
+          return 1
           }
 
+          callback_patch '{"status":"TESTING","heartbeatAt":"'$(date -u -Iseconds)'"}' || { echo "TESTING callback failed"; exit 1; }
           printf '%s' "$TASK_PROMPT" | aider --yes --no-git --model "$MODEL" --message-file /dev/stdin
+          callback_patch '{"status":"COMMITTING","heartbeatAt":"'$(date -u -Iseconds)'"}' || { echo "COMMITTING callback failed"; exit 1; }
 
           rm -rf node_modules .next dist build .aider* 2>/dev/null || true
           git add -A
@@ -182,6 +190,7 @@ jobs:
           fi
 
           git commit -m "agent($TASK_ID): automated changes"
+          callback_patch '{"status":"PUSHING","heartbeatAt":"'$(date -u -Iseconds)'"}' || { echo "PUSHING callback failed"; exit 1; }
           git push -u origin "$BRANCH"
           echo "has_changes=true" >> "$GITHUB_OUTPUT"
           echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
@@ -199,6 +208,7 @@ jobs:
         run: |
           set -euo pipefail
           BRANCH="agent/$TASK_ID"
+          if [ -z "${GH_TOKEN:-}" ]; then echo "AGENT_GITHUB_TOKEN is required for automatic PR creation"; exit 1; fi
           set +e
           OUT=$(gh pr create --base "$TARGET_BRANCH" --head "$BRANCH" --title "[Personal AI Bot] $TASK_ID" --body "Automated coding task $TASK_ID" 2>&1)
           EC=$?
@@ -213,7 +223,8 @@ jobs:
           fi
           echo "pull-request-url=$PR_URL" >> "$GITHUB_OUTPUT"
           if [ -z "$PR_URL" ]; then
-            echo "PR not created. Enable: Settings → Actions → General → Workflow permissions → Allow GitHub Actions to create and approve pull requests"
+            echo "PR creation failed. AGENT_GITHUB_TOKEN must have pull-request write access."
+            exit 1
           fi
 
       - name: Report success / failure
@@ -239,8 +250,17 @@ jobs:
           ARGS=(-H "Content-Type: application/json" -H "x-worker-token: ${CALLBACK_TOKEN}")
           if [ -n "${WORKER_CALLBACK_SECRET:-}" ]; then ARGS+=(-H "x-worker-secret: ${WORKER_CALLBACK_SECRET}"); fi
           if [ -n "${VERCEL_BYPASS_SECRET:-}" ]; then ARGS+=(-H "x-vercel-protection-bypass: ${VERCEL_BYPASS_SECRET}"); fi
-          HTTP=$(curl -sS -o /tmp/final_cb.txt -w "%{http_code}" -X PATCH "$URL" "${ARGS[@]}" -d "$PAYLOAD" || echo "000")
-          echo "final_callback_http=$HTTP"; head -c 300 /tmp/final_cb.txt || true; echo
+          HTTP="000"
+          for attempt in 1 2 3 4 5 6; do
+            HTTP=$(curl -sS -o /tmp/final_cb.txt -w "%{http_code}" -X PATCH "$URL" "${ARGS[@]}" -d "$PAYLOAD" || echo "000")
+            echo "final_callback_http=$HTTP attempt=$attempt"
+            if [[ "$HTTP" =~ ^2[0-9][0-9]$ ]]; then break; fi
+            sleep $((attempt * 3))
+          done
+          head -c 300 /tmp/final_cb.txt || true; echo
+          if ! [[ "$HTTP" =~ ^2[0-9][0-9]$ ]]; then
+            echo "Final control-plane callback failed after retries"; exit 1
+          fi
 
       - name: Cleanup workspace (ephemeral)
         if: always()
