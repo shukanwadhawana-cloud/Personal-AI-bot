@@ -137,7 +137,56 @@ jobs:
 
           MODEL="gemini/gemini-3.6-flash"
           echo "Using model $MODEL"
+
+          # Baseline is captured after worker housekeeping so acceptance checks only agent output.
+          BASELINE_SHA="$(git rev-parse HEAD)"
           printf '%s' "$TASK_PROMPT" | aider --yes --no-git --model "$MODEL" --message-file /dev/stdin
+
+          # Task Output Integrity / Acceptance Criteria gate.
+          # A task cannot reach PR creation unless requested work materially exists.
+          acceptance_attempt=1
+          acceptance_max_attempts=3
+          acceptance_passed=0
+          while [ "$acceptance_attempt" -le "$acceptance_max_attempts" ]; do
+            echo "=== Acceptance-criteria attempt $acceptance_attempt ==="
+            set +e
+            ACCEPTANCE_OUTPUT="$(python ../.github/scripts/task-acceptance-gate.py "$TASK_PROMPT" "$BASELINE_SHA" 2>&1)"
+            acceptance_rc=$?
+            set -e
+            echo "$ACCEPTANCE_OUTPUT"
+
+            if [ "$acceptance_rc" -eq 0 ]; then
+              acceptance_passed=1
+              break
+            fi
+
+            if [ "$acceptance_attempt" -lt "$acceptance_max_attempts" ]; then
+              echo "Acceptance gate failed; asking the agent to implement the missing requested work."
+              ACCEPTANCE_CONTEXT="$(printf '%s\n' "$ACCEPTANCE_OUTPUT" | tail -n 120 | head -c 12000)"
+              REMEDIATION_PROMPT="$(cat <<EOF
+The implementation FAILED the task-output acceptance gate.
+
+Original task:
+$TASK_PROMPT
+
+Acceptance-gate evidence:
+$ACCEPTANCE_CONTEXT
+
+Do not merely explain the failure. Inspect the current repository and implement the ORIGINAL task materially.
+Ensure the requested feature, behavior, or files actually exist in the working tree.
+Do not make unrelated changes and do not modify only .gitignore, lockfiles, generated files, or build artifacts.
+Leave the repository ready for the existing install/test/build verification.
+EOF
+)"
+              printf '%s' "$REMEDIATION_PROMPT" | aider --yes --no-git --model "$MODEL" --message-file /dev/stdin
+            fi
+            acceptance_attempt=$((acceptance_attempt + 1))
+          done
+
+          if [ "$acceptance_passed" -ne 1 ]; then
+            echo "Task Output Integrity / Acceptance Criteria gate failed after $acceptance_max_attempts attempts."
+            exit 1
+          fi
 
           # Verification with up to 3 repair attempts
           attempt=1
