@@ -13,16 +13,15 @@ type Task = {
 };
 
 const statusLabel: Record<string, string> = {
-  RUNNING: 'Running',
-  TESTING: 'Testing',
-  FIXING: 'Fixing',
-  VERIFYING: 'Verifying',
-  COMMITTING: 'Committing',
-  PUSHING: 'Pushing',
-  PR_CREATED: 'PR created',
-  COMPLETED: 'Completed',
-  FAILED: 'Failed',
-  QUEUED: 'Queued',
+  RUNNING: 'Running', TESTING: 'Testing', FIXING: 'Fixing', VERIFYING: 'Verifying',
+  COMMITTING: 'Committing', PUSHING: 'Pushing', PR_CREATED: 'PR created',
+  COMPLETED: 'Completed', FAILED: 'Failed', QUEUED: 'Queued',
+};
+
+const statusTone = (status: string) => {
+  if (status === 'FAILED') return { bg: '#fff1f2', fg: '#b42318', dot: '#d92d20' };
+  if (['COMPLETED', 'PR_CREATED'].includes(status)) return { bg: '#ecfdf3', fg: '#027a48', dot: '#12b76a' };
+  return { bg: '#f2f4f7', fg: '#475467', dot: '#667085' };
 };
 
 export default function Home() {
@@ -36,111 +35,102 @@ export default function Home() {
     try {
       const res = await fetch(`/api/tasks/${id}`, { method: 'DELETE' });
       if (res.ok) setTasks((current) => current.filter((t) => t.id !== id));
-    } finally {
-      setDeleting(null);
-    }
+    } finally { setDeleting(null); }
   }
 
   useEffect(() => {
     if (status !== 'authenticated') return;
-    fetch('/api/tasks')
-      .then((r) => (r.ok ? r.json() : []))
-      .then(setTasks)
-      .catch(() => setTasks([]));
+    fetch('/api/tasks').then((r) => (r.ok ? r.json() : [])).then(setTasks).catch(() => setTasks([]));
   }, [status]);
 
   const authenticated = status === 'authenticated';
 
   return (
-    <main style={{ minHeight: '100vh', background: '#f7f8fa', color: '#17181c', fontFamily: 'Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif', padding: '28px 18px 48px' }}>
-      <div style={{ maxWidth: 760, margin: '0 auto' }}>
-        <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 16, marginBottom: 28 }}>
+    <main style={{ minHeight: '100vh', background: 'linear-gradient(180deg,#f8fafc 0%,#f4f6f8 100%)', color: '#101828', fontFamily: 'Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif', padding: '24px 16px 56px' }}>
+      <div style={{ maxWidth: 820, margin: '0 auto' }}>
+        <header style={{ display:'flex', justifyContent:'space-between', alignItems:'center', gap:16, padding:'8px 2px 28px' }}>
           <div>
-            <div style={{ fontSize: 26, fontWeight: 750, letterSpacing: '-0.03em' }}>Personal AI Bot</div>
-            <div style={{ color: '#686d78', fontSize: 13, marginTop: 5 }}>Gold Worker · AI coding tasks</div>
+            <div style={{ display:'flex', alignItems:'center', gap:10 }}>
+              <div style={{ width:36,height:36,borderRadius:11,background:'#101828',color:'#fff',display:'grid',placeItems:'center',fontWeight:800,fontSize:14 }}>AI</div>
+              <div>
+                <div style={{ fontSize:24,fontWeight:780,letterSpacing:'-.035em' }}>Personal AI Bot</div>
+                <div style={{ color:'#667085',fontSize:12.5,marginTop:3 }}>Gold Worker · AI coding tasks</div>
+              </div>
+            </div>
           </div>
           {authenticated ? (
-            <button onClick={() => signOut()} style={{ background: '#fff', border: '1px solid #dfe2e8', color: '#3b3f47', borderRadius: 10, padding: '9px 12px', fontSize: 13, cursor: 'pointer' }}>
-              Sign out
-            </button>
+            <button onClick={() => signOut()} style={{ background:'#fff',border:'1px solid #d0d5dd',color:'#344054',borderRadius:10,padding:'9px 12px',fontSize:12.5,fontWeight:650,cursor:'pointer' }}>Sign out</button>
           ) : (
-            <button onClick={() => signIn('github')} style={{ background: '#17181c', color: '#fff', border: 0, borderRadius: 10, padding: '10px 14px', fontWeight: 650, cursor: 'pointer' }}>
-              Sign in with GitHub
-            </button>
+            <button onClick={() => signIn('github')} style={{ background:'#101828',color:'#fff',border:0,borderRadius:10,padding:'10px 14px',fontWeight:700,cursor:'pointer' }}>Sign in with GitHub</button>
           )}
         </header>
 
-        <section style={{ background: '#fff', border: '1px solid #e2e5ea', borderRadius: 18, padding: 24, boxShadow: '0 8px 30px rgba(20,25,35,.05)', marginBottom: 18 }}>
-          <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 7 }}>Create a new coding task</div>
-          <div style={{ color: '#686d78', fontSize: 14, lineHeight: 1.5, marginBottom: 18 }}>
-            Describe what you want the Gold Worker to build, fix, test, or improve.
+        <section style={{ background:'#fff',border:'1px solid #e4e7ec',borderRadius:20,padding:'22px',boxShadow:'0 10px 32px rgba(16,24,40,.06)',marginBottom:14 }}>
+          <div style={{ display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:16 }}>
+            <div>
+              <div style={{ fontSize:18,fontWeight:750,letterSpacing:'-.02em' }}>Create a new coding task</div>
+              <div style={{ color:'#667085',fontSize:13.5,lineHeight:1.5,marginTop:6,maxWidth:570 }}>Describe what you want the Gold Worker to build, fix, test, or improve.</div>
+            </div>
+            <div style={{ display:'none' }} />
           </div>
-          {authenticated ? (
-            <a href="/tasks/new" style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', padding: '11px 17px', background: '#17181c', color: '#fff', borderRadius: 10, textDecoration: 'none', fontWeight: 650, fontSize: 14 }}>
-              + New coding task
-            </a>
-          ) : (
-            <button onClick={() => signIn('github')} style={{ padding: '11px 17px', background: '#17181c', color: '#fff', border: 0, borderRadius: 10, fontWeight: 650, cursor: 'pointer' }}>
-              Sign in to start
-            </button>
-          )}
+          <div style={{ marginTop:18 }}>
+            {authenticated ? (
+              <a href="/tasks/new" style={{ display:'inline-flex',alignItems:'center',justifyContent:'center',gap:7,padding:'11px 17px',background:'#101828',color:'#fff',borderRadius:10,textDecoration:'none',fontWeight:700,fontSize:13.5 }}>＋ New coding task</a>
+            ) : (
+              <button onClick={() => signIn('github')} style={{ padding:'11px 17px',background:'#101828',color:'#fff',border:0,borderRadius:10,fontWeight:700,cursor:'pointer' }}>Sign in to start</button>
+            )}
+          </div>
         </section>
 
-        <section style={{ background: '#f0f7f2', border: '1px solid #d3e5d8', borderRadius: 15, padding: '15px 17px', marginBottom: 26 }}>
-          <div style={{ color: '#24633a', fontSize: 14, fontWeight: 700 }}>● Gold Worker operational</div>
-          <div style={{ color: '#55705d', fontSize: 12.5, marginTop: 5, lineHeight: 1.45 }}>
-            Dispatch, Gemini/Aider, verification, callbacks and PR creation are connected.
+        <section style={{ background:'#effaf3',border:'1px solid #ccebd7',borderRadius:16,padding:'14px 16px',marginBottom:28,display:'flex',alignItems:'center',gap:12 }}>
+          <span style={{ width:10,height:10,borderRadius:'50%',background:'#12b76a',boxShadow:'0 0 0 4px #d9fbe8',flexShrink:0 }} />
+          <div style={{ minWidth:0 }}>
+            <div style={{ color:'#067647',fontSize:13.5,fontWeight:750 }}>Gold Worker operational</div>
+            <div style={{ color:'#47715a',fontSize:12.5,marginTop:3,lineHeight:1.4 }}>Dispatch · Gemini/Aider · verification · callbacks · PR creation</div>
           </div>
         </section>
 
         <section>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 12 }}>
-            <h2 style={{ fontSize: 18, margin: 0, letterSpacing: '-0.02em' }}>Recent tasks</h2>
-            {authenticated && tasks.length > 0 && <span style={{ color: '#858a94', fontSize: 12 }}>{tasks.length} task{tasks.length === 1 ? '' : 's'}</span>}
+          <div style={{ display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12 }}>
+            <div>
+              <h2 style={{ fontSize:18,margin:0,letterSpacing:'-.025em' }}>Recent tasks</h2>
+              <div style={{ color:'#98a2b3',fontSize:12,marginTop:3 }}>{authenticated ? 'Your latest coding runs' : 'Sign in to view your runs'}</div>
+            </div>
+            {authenticated && tasks.length > 0 && <span style={{ color:'#667085',fontSize:12,fontWeight:650 }}>{tasks.length} task{tasks.length === 1 ? '' : 's'}</span>}
           </div>
 
-          {!authenticated && <div style={{ background: '#fff', border: '1px solid #e2e5ea', borderRadius: 14, padding: 18, color: '#686d78', fontSize: 14 }}>Sign in to see and create tasks.</div>}
-          {authenticated && tasks.length === 0 && <div style={{ background: '#fff', border: '1px solid #e2e5ea', borderRadius: 14, padding: 18, color: '#686d78', fontSize: 14 }}>No tasks yet.</div>}
+          {!authenticated && <div style={{ background:'#fff',border:'1px solid #e4e7ec',borderRadius:16,padding:20,color:'#667085',fontSize:14 }}>Sign in to see and create tasks.</div>}
+          {authenticated && tasks.length === 0 && <div style={{ background:'#fff',border:'1px solid #e4e7ec',borderRadius:16,padding:24,color:'#667085',fontSize:14,textAlign:'center' }}>No tasks yet. Start your first coding task above.</div>}
 
-          <div style={{ display: 'grid', gap: 10 }}>
+          <div style={{ display:'grid',gap:10 }}>
             {tasks.map((t) => {
-              const label = statusLabel[t.status] || t.status.replaceAll('_', ' ');
-              const done = ['COMPLETED', 'PR_CREATED'].includes(t.status);
-              const failed = t.status === 'FAILED';
+              const label = statusLabel[t.status] || t.status.replaceAll('_',' ');
+              const tone = statusTone(t.status);
               return (
-                <div key={t.id} style={{ background: '#fff', border: '1px solid #e2e5ea', borderRadius: 14, padding: 16, boxShadow: '0 3px 14px rgba(20,25,35,.035)' }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
-                    <a href={`/tasks/${t.id}`} style={{ color: '#17181c', textDecoration: 'none', flex: 1, minWidth: 0 }}>
-                      <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 6, overflowWrap: 'anywhere' }}>{t.title || t.id.slice(0, 8)}</div>
-                      <div style={{ color: '#777c86', fontSize: 12.5, lineHeight: 1.45 }}>
-                        {t.repository} · {new Date(t.createdAt).toLocaleString()}
-                      </div>
+                <article key={t.id} style={{ background:'#fff',border:'1px solid #e4e7ec',borderRadius:16,padding:17,boxShadow:'0 4px 16px rgba(16,24,40,.035)' }}>
+                  <div style={{ display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:14 }}>
+                    <a href={`/tasks/${t.id}`} style={{ color:'#101828',textDecoration:'none',flex:1,minWidth:0 }}>
+                      <div style={{ fontWeight:730,fontSize:14.5,marginBottom:6,overflowWrap:'anywhere' }}>{t.title || `Task ${t.id.slice(0,8)}`}</div>
+                      <div style={{ color:'#667085',fontSize:12.5,lineHeight:1.45 }}>{t.repository}</div>
+                      <div style={{ color:'#98a2b3',fontSize:11.5,marginTop:3 }}>{new Date(t.createdAt).toLocaleString()}</div>
                     </a>
-                    <span style={{ flexShrink: 0, padding: '5px 9px', borderRadius: 999, background: failed ? '#fff0f0' : done ? '#eef8f1' : '#f1f3f6', color: failed ? '#a52d2d' : done ? '#24633a' : '#4f5560', fontSize: 11.5, fontWeight: 700 }}>
-                      {label}
+                    <span style={{ flexShrink:0,display:'inline-flex',alignItems:'center',gap:6,padding:'6px 9px',borderRadius:999,background:tone.bg,color:tone.fg,fontSize:11.5,fontWeight:750 }}>
+                      <span style={{ width:6,height:6,borderRadius:'50%',background:tone.dot }} />{label}
                     </span>
                   </div>
-                  {t.prUrl && (
-                    <div style={{ marginTop: 12, paddingTop: 11, borderTop: '1px solid #eef0f3' }}>
-                      <a href={t.prUrl} target="_blank" rel="noreferrer" style={{ color: '#315fd4', fontSize: 13, fontWeight: 650, textDecoration: 'none' }}>
-                        View pull request ↗
-                      </a>
+                  {(t.prUrl || authenticated) && (
+                    <div style={{ marginTop:13,paddingTop:11,borderTop:'1px solid #f0f2f5',display:'flex',justifyContent:'space-between',alignItems:'center',gap:10 }}>
+                      {t.prUrl ? <a href={t.prUrl} target="_blank" rel="noreferrer" style={{ color:'#175cd3',fontSize:12.5,fontWeight:700,textDecoration:'none' }}>View pull request ↗</a> : <span style={{ color:'#98a2b3',fontSize:12 }}>Worker is processing…</span>}
+                      <button type="button" onClick={() => deleteTask(t.id)} disabled={deleting === t.id} style={{ border:0,background:'transparent',color:'#b42318',borderRadius:7,padding:'5px 7px',fontSize:11.5,fontWeight:650,cursor:deleting === t.id ? 'wait' : 'pointer' }}>{deleting === t.id ? 'Deleting…' : 'Delete'}</button>
                     </div>
                   )}
-                  <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 10 }}>
-                    <button type="button" onClick={() => deleteTask(t.id)} disabled={deleting === t.id} aria-label={`Delete ${t.title || 'task'}`} style={{ border: 0, background: 'transparent', color: '#8a4a4a', borderRadius: 7, padding: '5px 7px', fontSize: 12, cursor: deleting === t.id ? 'wait' : 'pointer' }}>
-                      {deleting === t.id ? 'Deleting…' : 'Delete'}
-                    </button>
-                  </div>
-                </div>
+                </article>
               );
             })}
           </div>
         </section>
 
-        <footer style={{ marginTop: 38, textAlign: 'center', fontSize: 11.5, color: '#9499a2' }}>
-          ₹0 target · GitHub Actions execution
-        </footer>
+        <footer style={{ marginTop:40,textAlign:'center',fontSize:11.5,color:'#98a2b3' }}>₹0 target · GitHub Actions execution</footer>
       </div>
     </main>
   );
