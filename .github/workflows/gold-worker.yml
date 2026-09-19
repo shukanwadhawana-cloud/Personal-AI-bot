@@ -101,6 +101,14 @@ jobs:
           pip install --quiet aider-chat
           aider --version
 
+      - name: Load task acceptance verifier
+        env:
+          GH_TOKEN: ${{ secrets.AGENT_GITHUB_TOKEN != '' && secrets.AGENT_GITHUB_TOKEN || github.token }}
+        run: |
+          set -euo pipefail
+          gh api "repos/${{ github.repository }}/contents/.github/scripts/task-acceptance-gate.py?ref=${{ github.sha }}" --jq '.content' | base64 --decode > /tmp/task-acceptance-gate.py
+          python /tmp/task-acceptance-gate.py --help >/dev/null 2>&1 || true
+
       - name: Execute agent
         id: agent
         env:
@@ -150,7 +158,7 @@ jobs:
           while [ "$acceptance_attempt" -le "$acceptance_max_attempts" ]; do
             echo "=== Acceptance-criteria attempt $acceptance_attempt ==="
             set +e
-            ACCEPTANCE_OUTPUT="$(python ../.github/scripts/task-acceptance-gate.py "$TASK_PROMPT" "$BASELINE_SHA" 2>&1)"
+            ACCEPTANCE_OUTPUT="$(python /tmp/task-acceptance-gate.py "$TASK_PROMPT" "$BASELINE_SHA" 2>&1)"
             acceptance_rc=$?
             set -e
             echo "$ACCEPTANCE_OUTPUT"
