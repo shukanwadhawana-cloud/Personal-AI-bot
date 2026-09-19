@@ -13,3 +13,6 @@ npm-debug.log*
 .vercel
 *.tsbuildinfo
 next-env.d.ts
+.aider*
+.aider.chat.history.md
+.aider.input.history

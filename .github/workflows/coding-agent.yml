@@ -52,15 +52,9 @@ jobs:
         run: |
           set -euo pipefail
           echo "RUNNER_OK"
-          if [[ ! "$TARGET_REPO" =~ ^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$ ]]; then
-            echo "Invalid repository format"; exit 1
-          fi
-          if [[ -z "$TASK_ID" || ! "$TASK_ID" =~ ^[a-zA-Z0-9_-]+$ ]]; then
-            echo "Invalid task_id"; exit 1
-          fi
-          if [[ -z "$TASK_PROMPT" ]]; then
-            echo "prompt required"; exit 1
-          fi
+          if [[ ! "$TARGET_REPO" =~ ^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$ ]]; then echo "Invalid repository format"; exit 1; fi
+          if [[ -z "$TASK_ID" || ! "$TASK_ID" =~ ^[a-zA-Z0-9_-]+$ ]]; then echo "Invalid task_id"; exit 1; fi
+          if [[ -z "$TASK_PROMPT" ]]; then echo "prompt required"; exit 1; fi
 
       - name: Resolve GitHub token
         id: tok
@@ -69,11 +63,8 @@ jobs:
           AGENT_PAT: ${{ secrets.AGENT_GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          if [ -n "${AGENT_PAT:-}" ]; then
-            echo "token_source=AGENT_GITHUB_TOKEN" >> "$GITHUB_OUTPUT"
-          else
-            echo "token_source=GITHUB_TOKEN" >> "$GITHUB_OUTPUT"
-          fi
+          if [ -n "${AGENT_PAT:-}" ]; then echo "token_source=AGENT_GITHUB_TOKEN" >> "$GITHUB_OUTPUT"
+          else echo "token_source=GITHUB_TOKEN" >> "$GITHUB_OUTPUT"; fi
 
       - name: Validate GitHub CLI and authentication
         env:
@@ -81,13 +72,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git --version
-          gh --version
-          gh auth status
+          git --version; gh --version; gh auth status
           gh api "repos/${{ github.event.inputs.target_repo }}" --jq '.full_name + " (" + .default_branch + ")"'
 
       - name: Report RUNNING
-        id: report_running
         env:
           CALLBACK_TOKEN: ${{ github.event.inputs.callback_token }}
           CALLBACK_URL: ${{ github.event.inputs.callback_url }}
@@ -97,7 +85,7 @@ jobs:
         run: |
           set -uo pipefail
           if [ -z "${WORKER_CALLBACK_SECRET:-}" ]; then
-            echo "WARNING: WORKER_CALLBACK_SECRET is not set in Actions secrets. Callbacks need either that secret or a valid per-task lease token."
+            echo "WARNING: WORKER_CALLBACK_SECRET is empty in Actions secrets. Set it to the same value as on Vercel."
           fi
           URL="$CALLBACK_URL"
           if [ -n "${VERCEL_BYPASS_SECRET:-}" ]; then
@@ -109,9 +97,7 @@ jobs:
           if [ -n "${VERCEL_BYPASS_SECRET:-}" ]; then ARGS+=(-H "x-vercel-protection-bypass: ${VERCEL_BYPASS_SECRET}"); fi
           HTTP=$(curl -sS -o /tmp/cb_body.txt -w "%{http_code}" -X PATCH "$URL" "${ARGS[@]}" \
             -d "{\"status\":\"RUNNING\",\"workerRunId\":\"${{ github.run_id }}\",\"heartbeatAt\":\"$(date -u -Iseconds)\"}" || echo "000")
-          echo "callback_http=$HTTP"
-          head -c 400 /tmp/cb_body.txt || true; echo
-          if [[ "$HTTP" =~ ^2 ]]; then echo "ok=true" >> "$GITHUB_OUTPUT"; else echo "ok=false" >> "$GITHUB_OUTPUT"; fi
+          echo "callback_http=$HTTP"; head -c 400 /tmp/cb_body.txt || true; echo
 
       - name: Checkout target repository
         uses: actions/checkout@v4
@@ -133,7 +119,6 @@ jobs:
           set -euo pipefail
           python -m pip install --upgrade pip
           pip install --quiet aider-chat
-          jq --version
           aider --version
 
       - name: Execute agent loop
@@ -155,10 +140,8 @@ jobs:
           git config user.name "Personal-AI-Bot"
           git config user.email "bot@users.noreply.github.com"
 
-          # Ensure dependency dirs are never committed
-          if [ ! -f .gitignore ] || ! grep -qx 'node_modules/' .gitignore 2>/dev/null; then
-            printf '\nnode_modules/\n.next/\ndist/\nbuild/\n.env\n.env.*\n' >> .gitignore
-          fi
+          printf '\nnode_modules/\n.next/\n.aider*\n' >> .gitignore
+          sort -u .gitignore -o .gitignore || true
 
           BRANCH="agent/$TASK_ID"
           git fetch origin "$BRANCH" 2>/dev/null || true
@@ -168,11 +151,10 @@ jobs:
             git checkout -b "$BRANCH"
           fi
 
-          if [ -z "${GEMINI_API_KEY:-}" ]; then
-            echo "LLM_API_KEY is missing"; exit 1
-          fi
+          if [ -z "${GEMINI_API_KEY:-}" ]; then echo "LLM_API_KEY missing"; exit 1; fi
 
-          MODEL="gemini/gemini-2.0-flash"
+          # Current Google model (2026-09): gemini-3.6-flash
+          MODEL="gemini/gemini-3.6-flash"
           echo "Aider model: $MODEL"
 
           callback_patch() {
@@ -187,26 +169,11 @@ jobs:
             curl -sS -X PATCH "$url" "${args[@]}" -d "$payload" >/dev/null || true
           }
 
-          report_step() {
-            local step_id="$1" step_status="$2" step_name="$3" detail="$4" now
-            now="$(date -u -Iseconds)"
-            local payload
-            payload=$(jq -n --arg id "$step_id" --arg name "$step_name" --arg status "$step_status" --arg now "$now" --arg detail "$detail" \
-              '{step:{id:$id,name:$name,status:$status,startedAt:$now,completedAt:(if $status == "RUNNING" then null else $now end),detail:$detail}}')
-            callback_patch "$payload"
-          }
-
-          report_step "agent-execution" "RUNNING" "Execute coding agent" "Aider implementing change."
           printf '%s' "$TASK_PROMPT" | aider --yes --no-git --model "$MODEL" --message-file /dev/stdin
-          report_step "agent-execution" "COMPLETED" "Execute coding agent" "Aider finished."
 
-          # Never stage dependencies
-          rm -rf node_modules .next dist build 2>/dev/null || true
-          git reset HEAD -- node_modules .next dist build 2>/dev/null || true
-
+          rm -rf node_modules .next dist build .aider* 2>/dev/null || true
           git add -A
-          # Extra safety: unstage if anything slipped through
-          git reset HEAD -- node_modules .next 2>/dev/null || true
+          git reset HEAD -- node_modules .next .aider* 2>/dev/null || true
 
           if git diff --cached --quiet; then
             echo "No source changes to commit"
@@ -233,14 +200,21 @@ jobs:
           set -euo pipefail
           BRANCH="agent/$TASK_ID"
           set +e
-          PR_URL=$(gh pr create --base "$TARGET_BRANCH" --head "$BRANCH" --title "[Personal AI Bot] $TASK_ID" --body "Automated coding task $TASK_ID" 2>&1)
-          PR_EC=$?
+          OUT=$(gh pr create --base "$TARGET_BRANCH" --head "$BRANCH" --title "[Personal AI Bot] $TASK_ID" --body "Automated coding task $TASK_ID" 2>&1)
+          EC=$?
           set -e
-          if [ $PR_EC -ne 0 ] || [[ "$PR_URL" != https://* ]]; then
+          echo "$OUT"
+          PR_URL=""
+          if [ $EC -eq 0 ] && [[ "$OUT" == https://* ]]; then
+            PR_URL=$(echo "$OUT" | tail -n1)
+          else
             EXISTING=$(gh pr list --head "$BRANCH" --json url --jq '.[0].url' 2>/dev/null || true)
-            if [ -n "$EXISTING" ] && [[ "$EXISTING" == https://* ]]; then PR_URL="$EXISTING"; else PR_URL=""; fi
+            if [ -n "$EXISTING" ] && [[ "$EXISTING" == https://* ]]; then PR_URL="$EXISTING"; fi
           fi
           echo "pull-request-url=$PR_URL" >> "$GITHUB_OUTPUT"
+          if [ -z "$PR_URL" ]; then
+            echo "PR not created. Enable: Settings → Actions → General → Workflow permissions → Allow GitHub Actions to create and approve pull requests"
+          fi
 
       - name: Report success / failure
         if: always()
@@ -266,8 +240,7 @@ jobs:
           if [ -n "${WORKER_CALLBACK_SECRET:-}" ]; then ARGS+=(-H "x-worker-secret: ${WORKER_CALLBACK_SECRET}"); fi
           if [ -n "${VERCEL_BYPASS_SECRET:-}" ]; then ARGS+=(-H "x-vercel-protection-bypass: ${VERCEL_BYPASS_SECRET}"); fi
           HTTP=$(curl -sS -o /tmp/final_cb.txt -w "%{http_code}" -X PATCH "$URL" "${ARGS[@]}" -d "$PAYLOAD" || echo "000")
-          echo "final_callback_http=$HTTP"
-          head -c 300 /tmp/final_cb.txt || true; echo
+          echo "final_callback_http=$HTTP"; head -c 300 /tmp/final_cb.txt || true; echo
 
       - name: Cleanup workspace (ephemeral)
         if: always()
