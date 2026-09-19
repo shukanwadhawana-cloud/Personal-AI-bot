@@ -16,23 +16,15 @@ const CreateTaskSchema = z.object({
 });
 
 /**
- * ONLY this workflow ID is known-good for workflow_dispatch (verified 2026-09-19):
- *   id: 362081304
- *   path: .github/workflows/gold-worker.yml
- *   name: Gold Worker
- *
- * coding-agent.yml and coding-agent-dispatch.yml return GitHub 422
- * "Workflow does not have workflow_dispatch trigger" despite containing the key in YAML.
- * A stale Vercel env CODING_AGENT_WORKFLOW must not override this.
+ * Use the workflow filename rather than a numeric workflow ID.
+ * GitHub accepts the filename for workflow_dispatch and this avoids a stale
+ * numeric ID pointing at an older/recreated workflow registration.
  */
-const GOLD_WORKER_WORKFLOW_ID = '362081304';
+const GOLD_WORKER_WORKFLOW_FILE = '.github/workflows/gold-worker.yml';
 
 function resolveWorkflowRef(): string {
-  const fromEnv = (process.env.CODING_AGENT_WORKFLOW_ID || '').trim();
-  // Only accept numeric IDs from env (or gold-worker.yml). Reject known-broken filenames.
-  if (fromEnv && /^\d+$/.test(fromEnv)) return fromEnv;
-  if (fromEnv === 'gold-worker.yml') return fromEnv;
-  return GOLD_WORKER_WORKFLOW_ID;
+  // Ignore legacy numeric IDs so an old deployment cannot dispatch the wrong workflow.
+  return GOLD_WORKER_WORKFLOW_FILE;
 }
 
 export async function GET() {
