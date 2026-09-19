@@ -96,6 +96,7 @@ jobs:
         env:
           CALLBACK_TOKEN: ${{ github.event.inputs.callback_token }}
           CALLBACK_URL: ${{ github.event.inputs.callback_url }}
+          VERCEL_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
         shell: bash
         run: |
           set -euo pipefail
@@ -326,7 +327,15 @@ jobs:
 
           PAYLOAD=$(jq -n             --arg status "$STATUS"             --arg run "${{ github.run_id }}"             --arg commit "${{ steps.agent.outputs.commit }}"             --arg pr "${{ steps.pr.outputs.pull-request-url }}"             '{status:$status, workerRunId:$run, commitSha:$commit, prUrl:$pr}')
 
-          curl --fail-with-body -sS -X PATCH "$CALLBACK_URL"             -H "Content-Type: application/json"             -H "x-worker-token: $CALLBACK_TOKEN"             -d "$PAYLOAD"
+          CURL_ARGS=(-H "Content-Type: application/json" -H "x-worker-token: $CALLBACK_TOKEN")
+          if [ -n "${VERCEL_BYPASS_SECRET:-}" ]; then
+            CURL_ARGS+=(-H "x-vercel-protection-bypass: $VERCEL_BYPASS_SECRET")
+          fi
+          curl --fail-with-body -sS -X PATCH "$CALLBACK_URL" \
+            "${CURL_ARGS[@]}" \
+            -d "$PAYLOAD" || {
+              echo "Final callback unavailable; GitHub workflow result remains authoritative."
+            }
 
       - name: Cleanup workspace (ephemeral)
         if: always()
