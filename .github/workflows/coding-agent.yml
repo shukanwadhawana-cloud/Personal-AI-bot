@@ -52,8 +52,6 @@ jobs:
         run: |
           set -euo pipefail
           echo "RUNNER_OK"
-          echo "Runner: $RUNNER_NAME"
-          echo "OS: $RUNNER_OS"
           if [[ ! "$TARGET_REPO" =~ ^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$ ]]; then
             echo "Invalid repository format"
             exit 1
@@ -92,19 +90,46 @@ jobs:
           gh api "repos/${{ github.event.inputs.target_repo }}" --jq '.full_name + " (" + .default_branch + ")"'
 
       - name: Report RUNNING
-        if: ${{ always() }}
+        id: report_running
         env:
           CALLBACK_TOKEN: ${{ github.event.inputs.callback_token }}
           CALLBACK_URL: ${{ github.event.inputs.callback_url }}
           VERCEL_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
+          WORKER_CALLBACK_SECRET: ${{ secrets.WORKER_CALLBACK_SECRET }}
         shell: bash
         run: |
-          set -euo pipefail
-          CURL_ARGS=(-H "Content-Type: application/json" -H "x-worker-token: $CALLBACK_TOKEN")
+          set -uo pipefail
+          # Dual auth: per-task lease token AND shared worker secret.
+          # Dual bypass: header + query param (Vercel docs support both).
+          URL="$CALLBACK_URL"
           if [ -n "${VERCEL_BYPASS_SECRET:-}" ]; then
-            CURL_ARGS+=(-H "x-vercel-protection-bypass: $VERCEL_BYPASS_SECRET")
+            if [[ "$URL" == *\?* ]]; then
+              URL="${URL}&x-vercel-protection-bypass=${VERCEL_BYPASS_SECRET}"
+            else
+              URL="${URL}?x-vercel-protection-bypass=${VERCEL_BYPASS_SECRET}"
+            fi
           fi
-          curl --fail-with-body -sS -X PATCH "$CALLBACK_URL" "${CURL_ARGS[@]}" -d '{"status":"RUNNING","workerRunId":"${{ github.run_id }}","heartbeatAt":"'$(date -u -Iseconds)'"}'
+          ARGS=(-H "Content-Type: application/json" -H "x-worker-token: ${CALLBACK_TOKEN}")
+          if [ -n "${WORKER_CALLBACK_SECRET:-}" ]; then
+            ARGS+=(-H "x-worker-secret: ${WORKER_CALLBACK_SECRET}")
+          fi
+          if [ -n "${VERCEL_BYPASS_SECRET:-}" ]; then
+            ARGS+=(-H "x-vercel-protection-bypass: ${VERCEL_BYPASS_SECRET}")
+          fi
+          HTTP=$(curl -sS -o /tmp/cb_body.txt -w "%{http_code}" -X PATCH "$URL" "${ARGS[@]}" \
+            -d "{\"status\":\"RUNNING\",\"workerRunId\":\"${{ github.run_id }}\",\"heartbeatAt\":\"$(date -u -Iseconds)\"}" || echo "000")
+          echo "callback_http=$HTTP"
+          # Never log secrets; body may contain only error JSON
+          head -c 400 /tmp/cb_body.txt || true
+          echo
+          if [[ "$HTTP" =~ ^2 ]]; then
+            echo "RUNNING callback ok"
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "RUNNING callback returned HTTP $HTTP — continuing agent work; final status may still update."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            # Do not exit 1: coding work must still run
+          fi
 
       - name: Checkout target repository
         uses: actions/checkout@v4
@@ -138,6 +163,8 @@ jobs:
           GH_TOKEN: ${{ secrets.AGENT_GITHUB_TOKEN != '' && secrets.AGENT_GITHUB_TOKEN || github.token }}
           CALLBACK_TOKEN: ${{ github.event.inputs.callback_token }}
           CALLBACK_URL: ${{ github.event.inputs.callback_url }}
+          VERCEL_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
+          WORKER_CALLBACK_SECRET: ${{ secrets.WORKER_CALLBACK_SECRET }}
         working-directory: workspace
         shell: bash
         run: |
@@ -162,8 +189,28 @@ jobs:
           fi
 
           echo "LLM provider: Google Gemini API"
-          MODEL="gemini/gemini-3.6-flash"
+          MODEL="gemini/gemini-2.0-flash"
           echo "Aider model route: $MODEL"
+
+          callback_patch() {
+            local payload="$1"
+            local url="$CALLBACK_URL"
+            if [ -n "${VERCEL_BYPASS_SECRET:-}" ]; then
+              if [[ "$url" == *\?* ]]; then
+                url="${url}&x-vercel-protection-bypass=${VERCEL_BYPASS_SECRET}"
+              else
+                url="${url}?x-vercel-protection-bypass=${VERCEL_BYPASS_SECRET}"
+              fi
+            fi
+            local args=(-H "Content-Type: application/json" -H "x-worker-token: ${CALLBACK_TOKEN}")
+            if [ -n "${WORKER_CALLBACK_SECRET:-}" ]; then
+              args+=(-H "x-worker-secret: ${WORKER_CALLBACK_SECRET}")
+            fi
+            if [ -n "${VERCEL_BYPASS_SECRET:-}" ]; then
+              args+=(-H "x-vercel-protection-bypass: ${VERCEL_BYPASS_SECRET}")
+            fi
+            curl -sS -X PATCH "$url" "${args[@]}" -d "$payload" >/dev/null || true
+          }
 
           report_step() {
             local step_id="$1"
@@ -172,13 +219,10 @@ jobs:
             local detail="$4"
             local now
             now="$(date -u -Iseconds)"
-            jq -n --arg id "$step_id" --arg name "$step_name" --arg status "$step_status" --arg now "$now" --arg detail "$detail" \
-              '{step:{id:$id,name:$name,status:$status,startedAt:$now,completedAt:(if $status == "RUNNING" then null else $now end),detail:$detail}}' |
-              CURL_ARGS=(-H "Content-Type: application/json" -H "x-worker-token: $CALLBACK_TOKEN")
-              if [ -n "${VERCEL_BYPASS_SECRET:-}" ]; then
-                CURL_ARGS+=(-H "x-vercel-protection-bypass: $VERCEL_BYPASS_SECRET")
-              fi
-              curl --fail-with-body -sS -X PATCH "$CALLBACK_URL" "${CURL_ARGS[@]}" -d @- || true
+            local payload
+            payload=$(jq -n --arg id "$step_id" --arg name "$step_name" --arg status "$step_status" --arg now "$now" --arg detail "$detail" \
+              '{step:{id:$id,name:$name,status:$status,startedAt:$now,completedAt:(if $status == "RUNNING" then null else $now end),detail:$detail}}')
+            callback_patch "$payload"
           }
 
           report_step "agent-execution" "RUNNING" "Execute coding agent" "Aider is inspecting the repository and implementing the requested change."
@@ -258,13 +302,12 @@ jobs:
           set -euo pipefail
           BRANCH="agent/$TASK_ID"
           set +e
-          PR_URL=$(gh pr create             --base "$TARGET_BRANCH"             --head "$BRANCH"             --title "[Personal AI Bot] $TASK_ID"             --body "Automated coding task $TASK_ID" 2>&1)
+          PR_URL=$(gh pr create --base "$TARGET_BRANCH" --head "$BRANCH" --title "[Personal AI Bot] $TASK_ID" --body "Automated coding task $TASK_ID" 2>&1)
           PR_EC=$?
           set -e
 
           if [ $PR_EC -ne 0 ] || [[ "$PR_URL" != https://* ]]; then
             echo "gh pr create failed (exit $PR_EC): $PR_URL"
-            echo "If this says Actions cannot create PRs, enable: Settings -> Actions -> General -> Workflow permissions -> Allow GitHub Actions to create and approve pull requests"
             EXISTING=$(gh pr list --head "$BRANCH" --json url --jq '.[0].url' 2>/dev/null || true)
             if [ -n "$EXISTING" ] && [[ "$EXISTING" == https://* ]]; then
               PR_URL="$EXISTING"
@@ -277,82 +320,54 @@ jobs:
 
           echo "pull-request-url=$PR_URL" >> "$GITHUB_OUTPUT"
 
-
-      - name: Record execution steps
-        if: always()
-        env:
-          CALLBACK_TOKEN: ${{ github.event.inputs.callback_token }}
-          CALLBACK_URL: ${{ github.event.inputs.callback_url }}
-          VERCEL_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
-        shell: bash
-        run: |
-          set -euo pipefail
-                    report() {
-            local payload="$1"
-            local args=(-H "Content-Type: application/json" -H "x-worker-token: $CALLBACK_TOKEN")
-            if [ -n "${VERCEL_BYPASS_SECRET:-}" ]; then
-              args+=(-H "x-vercel-protection-bypass: $VERCEL_BYPASS_SECRET")
-            fi
-            curl -sS -X PATCH "$CALLBACK_URL" "${args[@]}" -d "$payload" || true
-          }
-          report '{"step":{"id":"runner","name":"Runner provisioned","status":"COMPLETED","detail":"GitHub hosted runner started successfully."}}'
-          report '{"step":{"id":"auth","name":"Validate inputs and authentication","status":"COMPLETED","detail":"Task inputs and GitHub access were validated."}}'
-          report '{"step":{"id":"checkout","name":"Checkout target repository","status":"COMPLETED","detail":"Requested repository and base branch were checked out."}}'
-          report '{"step":{"id":"tooling","name":"Install agent tooling","status":"COMPLETED","detail":"Python, aider-chat, and jq were installed and verified."}}'
-          if [ "${{ steps.agent.outcome }}" = "success" ]; then
-            # Agent execution is reported live by the Execute agent step.
-          else
-            # Agent execution failure is reported by the Execute agent step.
-          fi
-          if [ "${{ steps.agent.outcome }}" = "success" ] && [ "${{ steps.agent.outputs.has_changes }}" = "true" ]; then
-            report '{"step":{"id":"git-push","name":"Commit and push changes","status":"COMPLETED","detail":"Agent changes were committed and pushed."}}'
-            if [ -n "${{ steps.pr.outputs.pull-request-url }}" ]; then
-              report '{"step":{"id":"pr","name":"Create Pull Request","status":"COMPLETED","detail":"Pull request created or reused."}}'
-            else
-              report '{"step":{"id":"pr","name":"Create Pull Request","status":"COMPLETED","detail":"No PR URL was available; branch and commit remain available."}}'
-            fi
-          fi
-          if [ "${{ job.status }}" != "success" ]; then
-            report '{"step":{"id":"worker","name":"Worker execution","status":"FAILED","detail":"One or more workflow steps failed. See the GitHub Actions run for the exact failure."}}'
-          else
-            report '{"step":{"id":"worker","name":"Worker execution","status":"COMPLETED","detail":"Workflow finished successfully."}}'
-          fi
-
       - name: Report success / failure
         if: always()
         env:
           CALLBACK_TOKEN: ${{ github.event.inputs.callback_token }}
           CALLBACK_URL: ${{ github.event.inputs.callback_url }}
           VERCEL_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
+          WORKER_CALLBACK_SECRET: ${{ secrets.WORKER_CALLBACK_SECRET }}
         shell: bash
         run: |
-          set -euo pipefail
+          set -uo pipefail
 
           STATUS="FAILED"
           if [ "${{ job.status }}" = "success" ]; then
             if [ -n "${{ steps.pr.outputs.pull-request-url }}" ]; then
               STATUS="PR_CREATED"
-            elif [ "${{ steps.agent.outputs.has_changes }}" = "true" ]; then
-              STATUS="COMPLETED"
             else
               STATUS="COMPLETED"
             fi
           fi
 
-          PAYLOAD=$(jq -n             --arg status "$STATUS"             --arg run "${{ github.run_id }}"             --arg commit "${{ steps.agent.outputs.commit }}"             --arg pr "${{ steps.pr.outputs.pull-request-url }}"             '{status:$status, workerRunId:$run, commitSha:$commit, prUrl:$pr}')
+          PAYLOAD=$(jq -n \
+            --arg status "$STATUS" \
+            --arg run "${{ github.run_id }}" \
+            --arg commit "${{ steps.agent.outputs.commit }}" \
+            --arg pr "${{ steps.pr.outputs.pull-request-url }}" \
+            '{status:$status, workerRunId:$run, commitSha:$commit, prUrl:$pr}')
 
-          CURL_ARGS=(-H "Content-Type: application/json" -H "x-worker-token: $CALLBACK_TOKEN")
+          URL="$CALLBACK_URL"
           if [ -n "${VERCEL_BYPASS_SECRET:-}" ]; then
-            CURL_ARGS+=(-H "x-vercel-protection-bypass: $VERCEL_BYPASS_SECRET")
+            if [[ "$URL" == *\?* ]]; then
+              URL="${URL}&x-vercel-protection-bypass=${VERCEL_BYPASS_SECRET}"
+            else
+              URL="${URL}?x-vercel-protection-bypass=${VERCEL_BYPASS_SECRET}"
+            fi
           fi
-          curl --fail-with-body -sS -X PATCH "$CALLBACK_URL" \
-            "${CURL_ARGS[@]}" \
-            -d "$PAYLOAD" || {
-              echo "Final callback unavailable; GitHub workflow result remains authoritative."
-            }
+          ARGS=(-H "Content-Type: application/json" -H "x-worker-token: ${CALLBACK_TOKEN}")
+          if [ -n "${WORKER_CALLBACK_SECRET:-}" ]; then
+            ARGS+=(-H "x-worker-secret: ${WORKER_CALLBACK_SECRET}")
+          fi
+          if [ -n "${VERCEL_BYPASS_SECRET:-}" ]; then
+            ARGS+=(-H "x-vercel-protection-bypass: ${VERCEL_BYPASS_SECRET}")
+          fi
+          HTTP=$(curl -sS -o /tmp/final_cb.txt -w "%{http_code}" -X PATCH "$URL" "${ARGS[@]}" -d "$PAYLOAD" || echo "000")
+          echo "final_callback_http=$HTTP"
+          head -c 300 /tmp/final_cb.txt || true
+          echo
 
       - name: Cleanup workspace (ephemeral)
         if: always()
         shell: bash
         run: rm -rf workspace || true
-
