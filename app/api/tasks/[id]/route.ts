@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { appendTaskStep, deleteTask, getTask, getTaskWorkerLease, updateTask } from '@/lib/tasks';
 import { requireUser } from '@/lib/auth';
 
+// Deployment touch: ensure newly configured Vercel environment variables are loaded.
+
 export async function GET(
   _req: NextRequest,
   { params }: { params: { id: string } }
