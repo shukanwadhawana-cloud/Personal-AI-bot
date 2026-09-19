@@ -100,7 +100,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-                    curl --fail-with-body -sS -X PATCH "$CALLBACK_URL"             -H "Content-Type: application/json"             -H "x-worker-token: $CALLBACK_TOKEN"             -d '{"status":"RUNNING","workerRunId":"${{ github.run_id }}","heartbeatAt":"'$(date -u -Iseconds)'"}'
+          CURL_ARGS=(-H "Content-Type: application/json" -H "x-worker-token: $CALLBACK_TOKEN")
+          if [ -n "${VERCEL_BYPASS_SECRET:-}" ]; then
+            CURL_ARGS+=(-H "x-vercel-protection-bypass: $VERCEL_BYPASS_SECRET")
+          fi
+          curl --fail-with-body -sS -X PATCH "$CALLBACK_URL" "${CURL_ARGS[@]}" -d '{"status":"RUNNING","workerRunId":"${{ github.run_id }}","heartbeatAt":"'$(date -u -Iseconds)'"}'
 
       - name: Checkout target repository
         uses: actions/checkout@v4
@@ -170,8 +174,11 @@ jobs:
             now="$(date -u -Iseconds)"
             jq -n --arg id "$step_id" --arg name "$step_name" --arg status "$step_status" --arg now "$now" --arg detail "$detail" \
               '{step:{id:$id,name:$name,status:$status,startedAt:$now,completedAt:(if $status == "RUNNING" then null else $now end),detail:$detail}}' |
-              curl --fail-with-body -sS -X PATCH "$CALLBACK_URL" \
-                -H "Content-Type: application/json" -H "x-worker-token: $CALLBACK_TOKEN" -d @- || true
+              CURL_ARGS=(-H "Content-Type: application/json" -H "x-worker-token: $CALLBACK_TOKEN")
+              if [ -n "${VERCEL_BYPASS_SECRET:-}" ]; then
+                CURL_ARGS+=(-H "x-vercel-protection-bypass: $VERCEL_BYPASS_SECRET")
+              fi
+              curl --fail-with-body -sS -X PATCH "$CALLBACK_URL" "${CURL_ARGS[@]}" -d @- || true
           }
 
           report_step "agent-execution" "RUNNING" "Execute coding agent" "Aider is inspecting the repository and implementing the requested change."
@@ -276,11 +283,17 @@ jobs:
         env:
           CALLBACK_TOKEN: ${{ github.event.inputs.callback_token }}
           CALLBACK_URL: ${{ github.event.inputs.callback_url }}
+          VERCEL_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
         shell: bash
         run: |
           set -euo pipefail
                     report() {
-            curl -sS -X PATCH "$CALLBACK_URL" -H "Content-Type: application/json" -H "x-worker-token: $CALLBACK_TOKEN" -d "$1" || true
+            local payload="$1"
+            local args=(-H "Content-Type: application/json" -H "x-worker-token: $CALLBACK_TOKEN")
+            if [ -n "${VERCEL_BYPASS_SECRET:-}" ]; then
+              args+=(-H "x-vercel-protection-bypass: $VERCEL_BYPASS_SECRET")
+            fi
+            curl -sS -X PATCH "$CALLBACK_URL" "${args[@]}" -d "$payload" || true
           }
           report '{"step":{"id":"runner","name":"Runner provisioned","status":"COMPLETED","detail":"GitHub hosted runner started successfully."}}'
           report '{"step":{"id":"auth","name":"Validate inputs and authentication","status":"COMPLETED","detail":"Task inputs and GitHub access were validated."}}'
