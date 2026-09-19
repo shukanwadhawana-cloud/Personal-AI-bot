@@ -4,6 +4,9 @@ export const metadata = {
   title: 'Personal AI Bot',
   description: 'Persistent cloud coding agent controllable from iPhone/iPad',
   manifest: '/manifest.json',
+};
+
+export const viewport = {
   themeColor: '#111',
 };
 
