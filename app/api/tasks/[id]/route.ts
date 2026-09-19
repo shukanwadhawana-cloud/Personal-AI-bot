@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { appendTaskStep, getTask, getTaskWorkerLease, updateTask } from '@/lib/tasks';
+import { appendTaskStep, deleteTask, getTask, getTaskWorkerLease, updateTask } from '@/lib/tasks';
 import { requireUser } from '@/lib/auth';
 
 export async function GET(
@@ -25,6 +25,22 @@ export async function GET(
  *
  * Protected fields (userId, createdAt, id) are never accepted from the body.
  */
+export async function DELETE(
+  _req: NextRequest,
+  { params }: { params: { id: string } }
+) {
+  const auth = await requireUser();
+  if (!auth) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+  try {
+    const deleted = await deleteTask(params.id, auth.userId);
+    if (!deleted) return NextResponse.json({ error: 'Not found' }, { status: 404 });
+    return NextResponse.json({ ok: true });
+  } catch (e: any) {
+    return NextResponse.json({ error: e.message || 'Error' }, { status: 500 });
+  }
+}
+
 export async function PATCH(
   req: NextRequest,
   { params }: { params: { id: string } }
