@@ -16,21 +16,13 @@ const CreateTaskSchema = z.object({
 });
 
 /**
- * Authoritative workflow file name for GitHub Actions dispatch.
+ * Authoritative workflow for dispatch. GitHub accepts the BARE filename only
+ * (pai-worker.yml). Full paths like .github/workflows/pai-worker.yml return 404.
  *
- * GitHub API accepts the bare filename (e.g. personal-ai-agent.yml),
- * NOT the full path (.github/workflows/...). Using the full path returns 404.
- *
- * Numeric IDs are intentionally avoided: when a workflow YAML is updated in a
- * way that breaks GitHub's registration, the ID can remain "active" but lose
- * workflow_dispatch (422). A fresh filename forces a clean registration.
- *
- * Broken / legacy (do not use):
- * - coding-agent.yml / coding-agent-dispatch.yml (422)
- * - gold-worker.yml after broken re-registration (422)
- * - .github/workflows/*.yml path form (404)
+ * Do not use numeric IDs from older broken registrations (gold-worker 362081304,
+ * coding-agent*, personal-ai-agent when name shows as path string).
  */
-const WORKFLOW_FILE = 'personal-ai-agent.yml';
+const WORKFLOW_FILE = 'pai-worker.yml';
 
 export async function GET() {
   const auth = await requireUser();
@@ -63,8 +55,6 @@ export async function POST(req: NextRequest) {
 
     const controlPlaneRepo =
       process.env.CONTROL_PLANE_REPO || 'shukanwadhawana-cloud/Personal-AI-bot';
-    // Single authoritative identifier — ignore stale env overrides that point
-    // at broken workflow registrations or full path prefixes.
     const workflowRef = WORKFLOW_FILE;
     const dispatchUrl = `https://api.github.com/repos/${controlPlaneRepo}/actions/workflows/${encodeURIComponent(workflowRef)}/dispatches`;
 
