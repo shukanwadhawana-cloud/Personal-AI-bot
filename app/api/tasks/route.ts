@@ -32,7 +32,7 @@ export async function POST(req: NextRequest) {
     const controlPlaneRepo = process.env.CONTROL_PLANE_REPO || 'shukanwadhawana-cloud/Personal-AI-bot';
     // Pin the exact workflow so a stale CODING_AGENT_WORKFLOW environment variable
     // cannot dispatch a different workflow without workflow_dispatch.
-    const workflowFile = 'coding-agent.yml';
+    const workflowFile = 'coding-agent-dispatch.yml';
     const dispatchUrl = 'https://api.github.com/repos/' + controlPlaneRepo + '/actions/workflows/' + workflowFile + '/dispatches';
 
     const sessionToken = await getToken({
