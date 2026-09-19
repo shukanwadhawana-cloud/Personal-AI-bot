@@ -1,0 +1,16 @@
+name: Dispatch Probe
+
+on:
+  workflow_dispatch:
+    inputs:
+      message:
+        description: Test message
+        required: true
+        type: string
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Echo
+        run: echo "${{ inputs.message }}"
