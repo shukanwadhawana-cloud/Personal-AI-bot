@@ -44,21 +44,25 @@ jobs:
 
     steps:
       - name: Validate inputs and runner
+        env:
+          TARGET_REPO: ${{ github.event.inputs.target_repo }}
+          TASK_ID: ${{ github.event.inputs.task_id }}
+          TASK_PROMPT: ${{ github.event.inputs.prompt }}
         shell: bash
         run: |
           set -euo pipefail
           echo "RUNNER_OK"
           echo "Runner: $RUNNER_NAME"
           echo "OS: $RUNNER_OS"
-          if [[ ! "${{ github.event.inputs.target_repo }}" =~ ^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$ ]]; then
+          if [[ ! "$TARGET_REPO" =~ ^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$ ]]; then
             echo "Invalid repository format"
             exit 1
           fi
-          if [[ -z "${{ github.event.inputs.task_id }}" || ! "${{ github.event.inputs.task_id }}" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+          if [[ -z "$TASK_ID" || ! "$TASK_ID" =~ ^[a-zA-Z0-9_-]+$ ]]; then
             echo "Invalid task_id"
             exit 1
           fi
-          if [[ -z "${{ github.event.inputs.prompt }}" ]]; then
+          if [[ -z "$TASK_PROMPT" ]]; then
             echo "prompt required"
             exit 1
           fi
