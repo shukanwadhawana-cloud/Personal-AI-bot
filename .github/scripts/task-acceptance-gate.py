@@ -79,7 +79,6 @@ CONTEXTUAL_SEGMENT_BLOCKLIST = {
     "frontend",
 }
 
-# Unquoted extension-less paths must start with a known source root.
 KNOWN_SOURCE_ROOTS = (
     "src/",
     "app/",
@@ -106,20 +105,12 @@ EXPLICIT_CODE_INTENT = re.compile(
     re.I,
 )
 
-# Prefer paths with file extensions. Extension-less only via quoted/backtick or known roots.
-EXPLICIT_PATH_REQUEST_RE = re.compile(
-    r"(?:"
-    r"(?:\b(?:add|create|implement|build|fix|update|refactor|remove|delete|replace|"
-    r"modify|change|make|write|edit|touch)\b[^\n.]{0,80}?)"
-    r"(?:`([^`\n]+)`|\"([^\"\n]+)\"|'([^'\n]+)'|"
-    r"(?P<path1>(?:[A-Za-z0-9_.\[\]-]+/)*[A-Za-z0-9_.\[\]-]+\.[A-Za-z0-9_.-]+))"
-    r"|"
-    r"(?:`([^`\n]+)`|\"([^\"\n]+)\"|'([^'\n]+)'|"
-    r"(?P<path2>(?:[A-Za-z0-9_.\[\]-]+/)*[A-Za-z0-9_.\[\]-]+\.[A-Za-z0-9_.-]+))"
-    r"[^\n.]{0,40}?\b(?:add|create|implement|build|fix|update|refactor|remove|delete|"
-    r"replace|modify|change|make|write|edit)\b"
-    r")",
-    re.I,
+# Path tokens with file extensions (supports [id] segments).
+PATH_WITH_EXT_RE = re.compile(
+    r"(?:`([^`\n]+\.[A-Za-z0-9_.-]+)`|\"([^\"\n]+\.[A-Za-z0-9_.-]+)\"|"
+    r"'([^'\n]+\.[A-Za-z0-9_.-]+)'|"
+    r"((?:[A-Za-z0-9_.\[\]-]+/)+[A-Za-z0-9_.\[\]-]+\.[A-Za-z0-9_.-]+)|"
+    r"([A-Za-z0-9_.\[\]-]+\.[A-Za-z0-9_.-]{1,15}))"
 )
 
 NAMED_FILE_RE = re.compile(
@@ -170,32 +161,23 @@ def has_file_extension(token: str) -> bool:
 
 
 def is_conceptual_slash_phrase(token: str) -> bool:
-    """True for prose like page/route, API/data-access, UI/page/API."""
     t = token.strip().strip("/").strip("`\"'").lower()
     if not t or "/" not in t:
         return False
     if has_file_extension(t):
         return False
-    if any(t.startswith(root) or f"/{root}" in f"/{t}" for root in KNOWN_SOURCE_ROOTS):
+    if any(t.startswith(root) for root in KNOWN_SOURCE_ROOTS):
         return False
     segments = [s for s in t.split("/") if s]
     if not segments:
         return True
     if all(s in CONTEXTUAL_SEGMENT_BLOCKLIST for s in segments):
         return True
-    # English-ish short segments without dots → treat as conceptual language.
     if len(segments) <= 4 and all(
         re.fullmatch(r"[a-z][a-z0-9-]{0,24}", s) for s in segments
     ):
-        if any(s in CONTEXTUAL_SEGMENT_BLOCKLIST for s in segments):
-            return True
-        # All-lowercase multi-segment with no known root and no extension → conceptual.
         return True
     return False
-
-
-def is_contextual_phrase_path(token: str) -> bool:
-    return is_conceptual_slash_phrase(token)
 
 
 def looks_like_url(token: str) -> bool:
@@ -217,7 +199,6 @@ def is_plausible_filesystem_path(path: str) -> bool:
         return False
     if has_file_extension(path):
         return True
-    # Extension-less: only accept under known source roots.
     lower = path.lower()
     return any(lower.startswith(root) for root in KNOWN_SOURCE_ROOTS)
 
@@ -225,21 +206,24 @@ def is_plausible_filesystem_path(path: str) -> bool:
 def extract_explicit_required_paths(prompt: str) -> Set[str]:
     required: Set[str] = set()
 
-    for m in EXPLICIT_PATH_REQUEST_RE.finditer(prompt):
-        groups = [g for g in m.groups() if g]
-        for g in groups:
-            path = normalize_path(g)
-            if not is_plausible_filesystem_path(path):
-                continue
-            required.add(path)
+    # Only consider paths when an implementation verb is present.
+    if not IMPLEMENTATION_VERBS.search(prompt):
+        return required
+
+    # Split into sentence-ish windows around verbs and collect path-with-ext tokens.
+    for verb_match in IMPLEMENTATION_VERBS.finditer(prompt):
+        start = verb_match.start()
+        window = prompt[start : start + 240]
+        for m in PATH_WITH_EXT_RE.finditer(window):
+            groups = [g for g in m.groups() if g]
+            for g in groups:
+                path = normalize_path(g)
+                if is_plausible_filesystem_path(path):
+                    required.add(path)
 
     for m in NAMED_FILE_RE.finditer(prompt):
         path = normalize_path(m.group("name") or "")
-        if not path:
-            continue
-        if not is_plausible_filesystem_path(path):
-            continue
-        if IMPLEMENTATION_VERBS.search(prompt):
+        if path and is_plausible_filesystem_path(path):
             required.add(path)
 
     return required
@@ -329,12 +313,7 @@ def evaluate(
     exact = extract_exact_content_requirement(prompt)
     if exact is not None:
         fname, expected = exact
-        candidates: List[str] = []
-        if fname:
-            candidates = [fname]
-        else:
-            candidates = list(implementation) or list(changed_list)
-
+        candidates: List[str] = [fname] if fname else (list(implementation) or list(changed_list))
         content_ok = False
         checked = []
         for c in candidates:
@@ -352,7 +331,6 @@ def evaluate(
             if got == exp or raw == expected or raw.strip() == expected.strip():
                 content_ok = True
                 break
-
         if not content_ok:
             target = fname or (",".join(checked[:3]) if checked else "(no candidate file)")
             reasons.append(f"Exact content requirement not met for {target}.")
@@ -376,10 +354,7 @@ def collect_git_changes(baseline: str) -> List[str]:
 
 def main(argv: Sequence[str]) -> int:
     if len(argv) < 3:
-        print(
-            "Usage: task-acceptance-gate.py <prompt> <baseline_sha>",
-            file=sys.stderr,
-        )
+        print("Usage: task-acceptance-gate.py <prompt> <baseline_sha>", file=sys.stderr)
         return 2
     prompt = argv[1]
     baseline = argv[2]
