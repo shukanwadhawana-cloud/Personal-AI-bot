@@ -21,7 +21,7 @@ on:
         required: true
         type: string
       callback_url:
-        description: Full URL to PATCH (e.g. https://app/api/tasks/id)
+        description: Full URL to PATCH
         required: true
         type: string
       callback_token:
@@ -52,19 +52,22 @@ jobs:
         run: |
           set -euo pipefail
           echo "RUNNER_OK"
-          if [[ ! "$TARGET_REPO" =~ ^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$ ]]; then echo "Invalid repository format"; exit 1; fi
-          if [[ -z "$TASK_ID" || ! "$TASK_ID" =~ ^[a-zA-Z0-9_-]+$ ]]; then echo "Invalid task_id"; exit 1; fi
-          if [[ -z "$TASK_PROMPT" ]]; then echo "prompt required"; exit 1; fi
+          [[ "$TARGET_REPO" =~ ^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$ ]] || { echo "Invalid repository format"; exit 1; }
+          [[ "$TASK_ID" =~ ^[a-zA-Z0-9_-]+$ ]] || { echo "Invalid task_id"; exit 1; }
+          [[ -n "$TASK_PROMPT" ]] || { echo "prompt required"; exit 1; }
 
       - name: Resolve GitHub token
         id: tok
-        shell: bash
         env:
           AGENT_PAT: ${{ secrets.AGENT_GITHUB_TOKEN }}
+        shell: bash
         run: |
           set -euo pipefail
-          if [ -n "${AGENT_PAT:-}" ]; then echo "token_source=AGENT_GITHUB_TOKEN" >> "$GITHUB_OUTPUT"
-          else echo "token_source=GITHUB_TOKEN" >> "$GITHUB_OUTPUT"; fi
+          if [ -n "${AGENT_PAT:-}" ]; then
+            echo "token_source=AGENT_GITHUB_TOKEN" >> "$GITHUB_OUTPUT"
+          else
+            echo "token_source=GITHUB_TOKEN" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Validate GitHub CLI and authentication
         env:
@@ -72,8 +75,42 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git --version; gh --version; gh auth status
+          gh auth status
           gh api "repos/${{ github.event.inputs.target_repo }}" --jq '.full_name + " (" + .default_branch + ")"'
+
+      - name: Define callback helper
+        id: callback
+        env:
+          CALLBACK_TOKEN: ${{ github.event.inputs.callback_token }}
+          CALLBACK_URL: ${{ github.event.inputs.callback_url }}
+          VERCEL_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
+          WORKER_CALLBACK_SECRET: ${{ secrets.WORKER_CALLBACK_SECRET }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/callback.sh <<'EOF'
+          callback_patch() {
+            local payload="$1"
+            local url="$CALLBACK_URL"
+            if [ -n "${VERCEL_BYPASS_SECRET:-}" ]; then
+              if [[ "$url" == *?* ]]; then url="${url}&x-vercel-protection-bypass=${VERCEL_BYPASS_SECRET}"
+              else url="${url}?x-vercel-protection-bypass=${VERCEL_BYPASS_SECRET}"; fi
+            fi
+            local args=(-H "Content-Type: application/json" -H "x-worker-token: ${CALLBACK_TOKEN}")
+            [ -n "${WORKER_CALLBACK_SECRET:-}" ] && args+=(-H "x-worker-secret: ${WORKER_CALLBACK_SECRET}")
+            [ -n "${VERCEL_BYPASS_SECRET:-}" ] && args+=(-H "x-vercel-protection-bypass: ${VERCEL_BYPASS_SECRET}")
+            local http="000"
+            for attempt in 1 2 3 4 5; do
+              http=$(curl -sS --connect-timeout 10 --max-time 30 -o /tmp/cb_body.txt -w "%{http_code}" -X PATCH "$url" "${args[@]}" -d "$payload" || true)
+              echo "callback_http=$http attempt=$attempt"
+              if [[ "$http" =~ ^2[0-9][0-9]$ ]]; then return 0; fi
+              sleep $((attempt * 2))
+            done
+            echo "callback failed: $(head -c 500 /tmp/cb_body.txt 2>/dev/null || true)"
+            return 1
+          }
+          EOF
+          echo 'callback_patch' >> "$GITHUB_OUTPUT"
 
       - name: Report RUNNING
         env:
@@ -83,21 +120,9 @@ jobs:
           WORKER_CALLBACK_SECRET: ${{ secrets.WORKER_CALLBACK_SECRET }}
         shell: bash
         run: |
-          set -uo pipefail
-          if [ -z "${WORKER_CALLBACK_SECRET:-}" ]; then
-            echo "WARNING: WORKER_CALLBACK_SECRET is empty in Actions secrets. Set it to the same value as on Vercel."
-          fi
-          URL="$CALLBACK_URL"
-          if [ -n "${VERCEL_BYPASS_SECRET:-}" ]; then
-            if [[ "$URL" == *\?* ]]; then URL="${URL}&x-vercel-protection-bypass=${VERCEL_BYPASS_SECRET}"
-            else URL="${URL}?x-vercel-protection-bypass=${VERCEL_BYPASS_SECRET}"; fi
-          fi
-          ARGS=(-H "Content-Type: application/json" -H "x-worker-token: ${CALLBACK_TOKEN}")
-          if [ -n "${WORKER_CALLBACK_SECRET:-}" ]; then ARGS+=(-H "x-worker-secret: ${WORKER_CALLBACK_SECRET}"); fi
-          if [ -n "${VERCEL_BYPASS_SECRET:-}" ]; then ARGS+=(-H "x-vercel-protection-bypass: ${VERCEL_BYPASS_SECRET}"); fi
-          HTTP=$(curl -sS -o /tmp/cb_body.txt -w "%{http_code}" -X PATCH "$URL" "${ARGS[@]}" \
-            -d "{\"status\":\"RUNNING\",\"workerRunId\":\"${{ github.run_id }}\",\"heartbeatAt\":\"$(date -u -Iseconds)\"}" || echo "000")
-          echo "callback_http=$HTTP"; head -c 400 /tmp/cb_body.txt || true; echo
+          set -euo pipefail
+          source /tmp/callback.sh
+          callback_patch '{"status":"RUNNING","workerRunId":"${{ github.run_id }}","heartbeatAt":"'"$(date -u -Iseconds)"'"}'
 
       - name: Checkout target repository
         uses: actions/checkout@v4
@@ -121,13 +146,12 @@ jobs:
           pip install --quiet aider-chat
           aider --version
 
-      - name: Execute agent loop
+      - name: Execute agent and verify
         id: agent
         env:
           GEMINI_API_KEY: ${{ secrets.LLM_API_KEY }}
           TASK_PROMPT: ${{ github.event.inputs.prompt }}
           TASK_ID: ${{ github.event.inputs.task_id }}
-          GH_TOKEN: ${{ secrets.AGENT_GITHUB_TOKEN != '' && secrets.AGENT_GITHUB_TOKEN || github.token }}
           CALLBACK_TOKEN: ${{ github.event.inputs.callback_token }}
           CALLBACK_URL: ${{ github.event.inputs.callback_url }}
           VERCEL_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
@@ -136,11 +160,24 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo "=== Personal AI Bot task $TASK_ID ==="
           git config user.name "Personal-AI-Bot"
           git config user.email "bot@users.noreply.github.com"
 
-          printf '\nnode_modules/\n.next/\n.aider*\n' >> .gitignore
+          source /tmp/callback.sh
+
+          step() {
+            local id="$1" name="$2" status="$3" detail="${4:-}"
+            local now
+            now=$(date -u -Iseconds)
+            local payload
+            payload=$(jq -n --arg id "$id" --arg name "$name" --arg status "$status" --arg started "$now" --arg detail "$detail"               '{step:{id:$id,name:$name,status:$status,startedAt:$started,detail:$detail}}')
+            if [ "$status" = "COMPLETED" ] || [ "$status" = "FAILED" ]; then
+              payload=$(jq --arg completed "$(date -u -Iseconds)" '.step.completedAt=$completed' <<<"$payload")
+            fi
+            callback_patch "$payload"
+          }
+
+          printf '\nnode_modules/\n.next/\ndist/\nbuild/\n.aider*\n' >> .gitignore
           sort -u .gitignore -o .gitignore || true
 
           BRANCH="agent/$TASK_ID"
@@ -151,47 +188,88 @@ jobs:
             git checkout -b "$BRANCH"
           fi
 
-          if [ -z "${GEMINI_API_KEY:-}" ]; then echo "LLM_API_KEY missing"; exit 1; fi
+          [ -n "${GEMINI_API_KEY:-}" ] || { step "agent" "Agent execution" "FAILED" "LLM_API_KEY missing"; exit 1; }
 
-          # Current Google model (2026-09): gemini-3.6-flash
+          step "agent" "Agent execution" "RUNNING" "Aider + Gemini"
           MODEL="gemini/gemini-3.6-flash"
-          echo "Aider model: $MODEL"
+          printf '%s' "$TASK_PROMPT" | aider --yes --no-git --model "$MODEL" --message-file /dev/stdin
 
-          callback_patch() {
-            local payload="$1" url="$CALLBACK_URL"
-            if [ -n "${VERCEL_BYPASS_SECRET:-}" ]; then
-              if [[ "$url" == *\?* ]]; then url="${url}&x-vercel-protection-bypass=${VERCEL_BYPASS_SECRET}"
-              else url="${url}?x-vercel-protection-bypass=${VERCEL_BYPASS_SECRET}"; fi
+          run_checks() {
+            set +e
+            rm -rf node_modules .next dist build 2>/dev/null || true
+            local rc=0
+            if [ -f package.json ]; then
+              if [ -f pnpm-lock.yaml ]; then
+                corepack enable >/dev/null 2>&1
+                pnpm install --frozen-lockfile || rc=$?
+                [ "$rc" -eq 0 ] && node -e "const p=require('./package.json'); process.exit(p.scripts?.test?0:1)" >/dev/null 2>&1 && pnpm test --if-present || true
+                [ "$rc" -eq 0 ] && pnpm run build --if-present || rc=$?
+              elif [ -f yarn.lock ]; then
+                corepack enable >/dev/null 2>&1
+                yarn install --immutable || rc=$?
+                [ "$rc" -eq 0 ] && yarn test --if-present || true
+                [ "$rc" -eq 0 ] && yarn build --if-present || rc=$?
+              else
+                npm ci || rc=$?
+                [ "$rc" -eq 0 ] && npm test --if-present || true
+                [ "$rc" -eq 0 ] && npm run build --if-present || rc=$?
+              fi
+            else
+              echo "No package.json; source-level verification only."
             fi
-            local args=(-H "Content-Type: application/json" -H "x-worker-token: ${CALLBACK_TOKEN}")
-            if [ -n "${WORKER_CALLBACK_SECRET:-}" ]; then args+=(-H "x-worker-secret: ${WORKER_CALLBACK_SECRET}"); fi
-            if [ -n "${VERCEL_BYPASS_SECRET:-}" ]; then args+=(-H "x-vercel-protection-bypass: ${VERCEL_BYPASS_SECRET}"); fi
-            for attempt in 1 2 3 4 5; do
-            http=$(curl -sS -o /tmp/cb_retry.txt -w "%{http_code}" -X PATCH "$url" "${args[@]}" -d "$payload" || echo "000")
-            echo "callback_http=$http attempt=$attempt"
-            if [[ "$http" =~ ^2[0-9][0-9]$ ]]; then return 0; fi
-            sleep $((attempt * 2))
-          done
-          return 1
+            return "$rc"
           }
 
-          callback_patch '{"status":"TESTING","heartbeatAt":"'$(date -u -Iseconds)'"}' || { echo "TESTING callback failed"; exit 1; }
-          printf '%s' "$TASK_PROMPT" | aider --yes --no-git --model "$MODEL" --message-file /dev/stdin
-          callback_patch '{"status":"COMMITTING","heartbeatAt":"'$(date -u -Iseconds)'"}' || { echo "COMMITTING callback failed"; exit 1; }
+          verification_log=/tmp/verification.log
+          verified=false
+          for attempt in 1 2 3; do
+            step "verify-$attempt" "Verification attempt $attempt" "RUNNING" "Running install/test/build checks"
+            if run_checks >"$verification_log" 2>&1; then
+              tail -n 80 "$verification_log" || true
+              step "verify-$attempt" "Verification attempt $attempt" "COMPLETED" "Checks passed"
+              verified=true
+              break
+            fi
 
-          rm -rf node_modules .next dist build .aider* 2>/dev/null || true
+            tail -n 120 "$verification_log" || true
+            if [ "$attempt" -lt 3 ]; then
+              step "verify-$attempt" "Verification attempt $attempt" "FAILED" "Checks failed; sending diagnostics to agent"
+              callback_patch '{"status":"FIXING","heartbeatAt":"'"$(date -u -Iseconds)"'"}'
+              FAILURE_CONTEXT=$(tail -n 180 "$verification_log" | tr -d '\000' | head -c 12000)
+              FIX_PROMPT=$(cat <<EOF
+The previous implementation failed verification.
+
+Fix the repository completely. Do not merely explain the failure.
+Verification output:
+$FAILURE_CONTEXT
+
+After fixing, leave the working tree ready to pass the same checks. Preserve the original task requirements.
+EOF
+)
+              printf '%s' "$FIX_PROMPT" | aider --yes --no-git --model "$MODEL" --message-file /dev/stdin
+            else
+              step "verify-$attempt" "Verification attempt $attempt" "FAILED" "Checks still failing after 3 repair attempts"
+            fi
+          done
+
+          [ "$verified" = true ] || { callback_patch '{"status":"FAILED","error":"Verification failed after 3 attempts"}' || true; exit 1; }
+          callback_patch '{"status":"VERIFYING","heartbeatAt":"'"$(date -u -Iseconds)"'"}'
+
           git add -A
-          git reset HEAD -- node_modules .next .aider* 2>/dev/null || true
-
+          git reset HEAD -- node_modules .next dist build .aider* 2>/dev/null || true
           if git diff --cached --quiet; then
-            echo "No source changes to commit"
-            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+            step "commit" "Commit changes" "FAILED" "No source changes"
             exit 1
           fi
 
+          step "commit" "Commit changes" "RUNNING" "Creating verified agent commit"
           git commit -m "agent($TASK_ID): automated changes"
-          callback_patch '{"status":"PUSHING","heartbeatAt":"'$(date -u -Iseconds)'"}' || { echo "PUSHING callback failed"; exit 1; }
+          step "commit" "Commit changes" "COMPLETED" "$(git rev-parse --short HEAD)"
+
+          callback_patch '{"status":"PUSHING","heartbeatAt":"'"$(date -u -Iseconds)"'"}'
           git push -u origin "$BRANCH"
+          step "push" "Push agent branch" "COMPLETED" "$BRANCH"
+
           echo "has_changes=true" >> "$GITHUB_OUTPUT"
           echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
           echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
@@ -208,24 +286,19 @@ jobs:
         run: |
           set -euo pipefail
           BRANCH="agent/$TASK_ID"
-          if [ -z "${GH_TOKEN:-}" ]; then echo "AGENT_GITHUB_TOKEN is required for automatic PR creation"; exit 1; fi
           set +e
           OUT=$(gh pr create --base "$TARGET_BRANCH" --head "$BRANCH" --title "[Personal AI Bot] $TASK_ID" --body "Automated coding task $TASK_ID" 2>&1)
           EC=$?
           set -e
           echo "$OUT"
           PR_URL=""
-          if [ $EC -eq 0 ] && [[ "$OUT" == https://* ]]; then
+          if [ "$EC" -eq 0 ] && [[ "$OUT" == https://* ]]; then
             PR_URL=$(echo "$OUT" | tail -n1)
           else
-            EXISTING=$(gh pr list --head "$BRANCH" --json url --jq '.[0].url' 2>/dev/null || true)
-            if [ -n "$EXISTING" ] && [[ "$EXISTING" == https://* ]]; then PR_URL="$EXISTING"; fi
+            PR_URL=$(gh pr list --head "$BRANCH" --json url --jq '.[0].url' 2>/dev/null || true)
           fi
           echo "pull-request-url=$PR_URL" >> "$GITHUB_OUTPUT"
-          if [ -z "$PR_URL" ]; then
-            echo "PR creation failed. AGENT_GITHUB_TOKEN must have pull-request write access."
-            exit 1
-          fi
+          [ -n "$PR_URL" ] || { echo "Automatic PR creation unavailable. AGENT_GITHUB_TOKEN or repository Actions PR permission is required."; exit 1; }
 
       - name: Report success / failure
         if: always()
@@ -237,32 +310,18 @@ jobs:
         shell: bash
         run: |
           set -uo pipefail
+          source /tmp/callback.sh
           STATUS="FAILED"
           if [ "${{ job.status }}" = "success" ]; then
             if [ -n "${{ steps.pr.outputs.pull-request-url }}" ]; then STATUS="PR_CREATED"; else STATUS="COMPLETED"; fi
           fi
-          PAYLOAD=$(jq -n --arg status "$STATUS" --arg run "${{ github.run_id }}" --arg commit "${{ steps.agent.outputs.commit }}" --arg pr "${{ steps.pr.outputs.pull-request-url }}" '{status:$status, workerRunId:$run, commitSha:$commit, prUrl:$pr}')
-          URL="$CALLBACK_URL"
-          if [ -n "${VERCEL_BYPASS_SECRET:-}" ]; then
-            if [[ "$URL" == *\?* ]]; then URL="${URL}&x-vercel-protection-bypass=${VERCEL_BYPASS_SECRET}"
-            else URL="${URL}?x-vercel-protection-bypass=${VERCEL_BYPASS_SECRET}"; fi
-          fi
-          ARGS=(-H "Content-Type: application/json" -H "x-worker-token: ${CALLBACK_TOKEN}")
-          if [ -n "${WORKER_CALLBACK_SECRET:-}" ]; then ARGS+=(-H "x-worker-secret: ${WORKER_CALLBACK_SECRET}"); fi
-          if [ -n "${VERCEL_BYPASS_SECRET:-}" ]; then ARGS+=(-H "x-vercel-protection-bypass: ${VERCEL_BYPASS_SECRET}"); fi
-          HTTP="000"
-          for attempt in 1 2 3 4 5 6; do
-            HTTP=$(curl -sS -o /tmp/final_cb.txt -w "%{http_code}" -X PATCH "$URL" "${ARGS[@]}" -d "$PAYLOAD" || echo "000")
-            echo "final_callback_http=$HTTP attempt=$attempt"
-            if [[ "$HTTP" =~ ^2[0-9][0-9]$ ]]; then break; fi
-            sleep $((attempt * 3))
-          done
-          head -c 300 /tmp/final_cb.txt || true; echo
-          if ! [[ "$HTTP" =~ ^2[0-9][0-9]$ ]]; then
-            echo "Final control-plane callback failed after retries"; exit 1
+          PAYLOAD=$(jq -n             --arg status "$STATUS"             --arg run "${{ github.run_id }}"             --arg commit "${{ steps.agent.outputs.commit }}"             --arg pr "${{ steps.pr.outputs.pull-request-url }}"             '{status:$status,workerRunId:$run,commitSha:$commit,prUrl:$pr}')
+          if ! callback_patch "$PAYLOAD"; then
+            echo "Final control-plane callback failed after retries"
+            exit 1
           fi
 
-      - name: Cleanup workspace (ephemeral)
+      - name: Cleanup workspace
         if: always()
         shell: bash
         run: rm -rf workspace || true
