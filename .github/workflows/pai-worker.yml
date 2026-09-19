@@ -151,7 +151,6 @@ jobs:
           MODEL="gemini/gemini-3.6-flash"
           echo "Using model $MODEL"
 
-          # --- Repository diagnostics (no secrets) ---
           echo "=== repository diagnostics ==="
           echo "cwd=$(pwd)"
           echo "git_root=$(git rev-parse --show-toplevel)"
@@ -162,9 +161,8 @@ jobs:
           git status --short | head -n 40 || true
           echo "=== end diagnostics ==="
 
-          # Aider: Git-aware for repo map/context; worker owns final commit/push.
-          # --no-auto-commits keeps commits under workflow control.
-          # Do NOT use --no-git (that yields "Git repo: none" / "Repo-map: disabled").
+          # Git-aware Aider: retains repository map/context.
+          # --no-auto-commits keeps final commit ownership on the worker.
           run_aider() {
             printf '%s' "$1" | aider --yes --no-auto-commits --model "$MODEL" --message-file /dev/stdin
           }
