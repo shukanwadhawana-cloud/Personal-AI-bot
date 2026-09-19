@@ -16,12 +16,24 @@ const CreateTaskSchema = z.object({
 });
 
 /**
- * Gold Worker workflow — verified via GitHub Actions API to accept workflow_dispatch.
- * Workflow ID 362081304 = .github/workflows/gold-worker.yml
- * Do NOT use coding-agent.yml or coding-agent-dispatch.yml (GitHub returns 422
- * "Workflow does not have workflow_dispatch trigger" for those registrations).
+ * ONLY this workflow ID is known-good for workflow_dispatch (verified 2026-09-19):
+ *   id: 362081304
+ *   path: .github/workflows/gold-worker.yml
+ *   name: Gold Worker
+ *
+ * coding-agent.yml and coding-agent-dispatch.yml return GitHub 422
+ * "Workflow does not have workflow_dispatch trigger" despite containing the key in YAML.
+ * A stale Vercel env CODING_AGENT_WORKFLOW must not override this.
  */
 const GOLD_WORKER_WORKFLOW_ID = '362081304';
+
+function resolveWorkflowRef(): string {
+  const fromEnv = (process.env.CODING_AGENT_WORKFLOW_ID || '').trim();
+  // Only accept numeric IDs from env (or gold-worker.yml). Reject known-broken filenames.
+  if (fromEnv && /^\d+$/.test(fromEnv)) return fromEnv;
+  if (fromEnv === 'gold-worker.yml') return fromEnv;
+  return GOLD_WORKER_WORKFLOW_ID;
+}
 
 export async function GET() {
   const auth = await requireUser();
@@ -54,11 +66,7 @@ export async function POST(req: NextRequest) {
 
     const controlPlaneRepo =
       process.env.CONTROL_PLANE_REPO || 'shukanwadhawana-cloud/Personal-AI-bot';
-    // Prefer env override only if set to a known-good id/path; otherwise pin to verified ID.
-    const workflowRef =
-      process.env.CODING_AGENT_WORKFLOW_ID ||
-      process.env.CODING_AGENT_WORKFLOW ||
-      GOLD_WORKER_WORKFLOW_ID;
+    const workflowRef = resolveWorkflowRef();
     const dispatchUrl = `https://api.github.com/repos/${controlPlaneRepo}/actions/workflows/${workflowRef}/dispatches`;
 
     const sessionToken = await getToken({
@@ -108,7 +116,6 @@ export async function POST(req: NextRequest) {
         });
 
         if (res.ok || res.status === 204) {
-          // Stay QUEUED until the worker reports RUNNING via callback
           await updateTask(task.id, { status: 'QUEUED' }, auth.userId);
         } else {
           const responseText = await res.text().catch(() => '');
