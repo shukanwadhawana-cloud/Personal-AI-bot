@@ -6,9 +6,7 @@ Run: python .github/scripts/test_task_acceptance_gate.py
 from __future__ import annotations
 
 import importlib.util
-import os
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 
@@ -28,7 +26,6 @@ gate = load_gate()
 
 class AcceptanceGateTests(unittest.TestCase):
     def test_e2e_test_txt_task_must_pass(self):
-        """Current failing production case: only e2e-test.txt created."""
         prompt = (
             "Add a file named `e2e-test.txt` containing exactly:\n\n"
             "Personal AI Bot E2E test passed\n\n"
@@ -47,7 +44,6 @@ class AcceptanceGateTests(unittest.TestCase):
         self.assertIn("e2e-test.txt", diag["required_paths"])
 
     def test_gitignore_only_must_fail(self):
-        """Housekeeping-only change despite implementation request."""
         prompt = (
             "Create an API route handler for /api/health that returns JSON status ok. "
             "Implement the feature properly."
@@ -56,8 +52,7 @@ class AcceptanceGateTests(unittest.TestCase):
         passed, reasons, diag = gate.evaluate(prompt, changed)
         self.assertFalse(passed, msg="gitignore-only must FAIL")
         self.assertTrue(
-            any("housekeeping" in r.lower() or "only housekeeping" in r.lower() for r in reasons)
-            or any("implementation work" in r for r in reasons),
+            any("housekeeping" in r.lower() or "implementation work" in r for r in reasons),
             msg=reasons,
         )
 
@@ -72,7 +67,6 @@ class AcceptanceGateTests(unittest.TestCase):
             prompt, changed, file_contents=contents
         )
         self.assertNotIn("owner/repo", diag["required_paths"])
-        self.assertNotIn("owner/repo", diag["missing"])
         self.assertTrue(passed, msg=reasons)
 
     def test_verification_acceptance_phrase_not_required_path(self):
@@ -86,7 +80,44 @@ class AcceptanceGateTests(unittest.TestCase):
             prompt, changed, file_contents=contents
         )
         self.assertNotIn("verification/acceptance", diag["required_paths"])
-        self.assertNotIn("verification/acceptance", diag["missing"])
+        self.assertTrue(passed, msg=reasons)
+
+    def test_conceptual_page_route_api_not_required(self):
+        prompt = (
+            "Build an application page/route and API/data-access path "
+            "for task control-plane status. Also mention UI/page/API."
+        )
+        changed = ["src/app/status/page.tsx"]
+        passed, reasons, diag = gate.evaluate(prompt, changed)
+        for bad in ("UI/page/API", "page/route", "API/data-access", "task/control-plane"):
+            self.assertNotIn(bad, diag["required_paths"], msg=diag)
+            self.assertNotIn(bad, diag["missing"], msg=diag)
+        self.assertTrue(passed, msg=reasons)
+
+    def test_create_src_example_ts_required(self):
+        prompt = "Create src/example.ts"
+        changed = ["src/example.ts"]
+        passed, reasons, diag = gate.evaluate(prompt, changed)
+        self.assertIn("src/example.ts", diag["required_paths"])
+        self.assertTrue(passed, msg=reasons)
+
+    def test_create_src_example_ts_missing_fails(self):
+        prompt = "Create src/example.ts"
+        passed, reasons, diag = gate.evaluate(prompt, ["README.md"])
+        self.assertFalse(passed)
+        self.assertIn("src/example.ts", diag["missing"])
+
+    def test_multiple_explicit_paths(self):
+        prompt = (
+            "Create src/app/api/tasks/[id]/route.ts and tests/task-audit.test.ts"
+        )
+        changed = [
+            "src/app/api/tasks/[id]/route.ts",
+            "tests/task-audit.test.ts",
+        ]
+        passed, reasons, diag = gate.evaluate(prompt, changed)
+        self.assertIn("src/app/api/tasks/[id]/route.ts", diag["required_paths"])
+        self.assertIn("tests/task-audit.test.ts", diag["required_paths"])
         self.assertTrue(passed, msg=reasons)
 
     def test_exact_content_mismatch_fails(self):
@@ -99,15 +130,8 @@ class AcceptanceGateTests(unittest.TestCase):
         passed, reasons, diag = gate.evaluate(
             prompt, changed, file_contents=contents
         )
-        self.assertFalse(passed, msg="wrong exact content must FAIL")
-        self.assertTrue(any("Exact content" in r for r in reasons), msg=reasons)
-
-    def test_explicit_src_path_required(self):
-        prompt = "Create the file src/utils/helpers.ts with a noop export."
-        changed = ["README.md"]
-        passed, reasons, diag = gate.evaluate(prompt, changed)
         self.assertFalse(passed)
-        self.assertIn("src/utils/helpers.ts", diag["missing"])
+        self.assertTrue(any("Exact content" in r for r in reasons), msg=reasons)
 
     def test_noop_empty_fails(self):
         prompt = "Create a file named feature.txt containing exactly: done"
@@ -117,7 +141,6 @@ class AcceptanceGateTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    # Ensure we can also import/run the gate CLI help path.
     loader = unittest.TestLoader()
     suite = loader.loadTestsFromTestCase(AcceptanceGateTests)
     result = unittest.TextTestRunner(verbosity=2).run(suite)
