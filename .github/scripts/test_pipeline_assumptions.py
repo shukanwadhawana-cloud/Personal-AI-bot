@@ -34,8 +34,7 @@ class PipelineAssumptionTests(unittest.TestCase):
         self.assertIn("working-directory: workspace", self.worker)
 
     def test_aider_not_no_git(self):
-        self.assertNotRegex(self.worker, r"aider[^
-]*--no-git")
+        self.assertNotIn("--no-git", self.worker)
 
     def test_aider_no_auto_commits(self):
         self.assertIn("--no-auto-commits", self.worker)
@@ -49,8 +48,7 @@ class PipelineAssumptionTests(unittest.TestCase):
             "task-acceptance-gate.py?ref=${{ github.sha }}", self.worker
         )
 
-    def test_no_gold_worker_dispatch(self):
-        # Worker file itself may not reference gold-worker; control plane is separate.
+    def test_no_gold_worker_in_worker_file(self):
         self.assertNotIn("gold-worker.yml", self.worker)
 
     def test_diagnostics_present(self):
