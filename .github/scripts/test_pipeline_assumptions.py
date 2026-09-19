@@ -33,8 +33,14 @@ class PipelineAssumptionTests(unittest.TestCase):
     def test_execute_in_workspace(self):
         self.assertIn("working-directory: workspace", self.worker)
 
-    def test_aider_not_no_git(self):
-        self.assertNotIn("--no-git", self.worker)
+    def test_aider_not_invoked_with_no_git(self):
+        # Command lines only (not comments)
+        for line in self.worker.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                continue
+            if "aider" in stripped and "--no-git" in stripped:
+                self.fail(f"Aider still invoked with --no-git: {stripped}")
 
     def test_aider_no_auto_commits(self):
         self.assertIn("--no-auto-commits", self.worker)
