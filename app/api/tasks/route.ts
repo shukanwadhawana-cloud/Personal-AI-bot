@@ -16,16 +16,21 @@ const CreateTaskSchema = z.object({
 });
 
 /**
- * Use the workflow filename rather than a numeric workflow ID.
- * GitHub accepts the filename for workflow_dispatch and this avoids a stale
- * numeric ID pointing at an older/recreated workflow registration.
+ * Authoritative workflow file name for GitHub Actions dispatch.
+ *
+ * GitHub API accepts the bare filename (e.g. personal-ai-agent.yml),
+ * NOT the full path (.github/workflows/...). Using the full path returns 404.
+ *
+ * Numeric IDs are intentionally avoided: when a workflow YAML is updated in a
+ * way that breaks GitHub's registration, the ID can remain "active" but lose
+ * workflow_dispatch (422). A fresh filename forces a clean registration.
+ *
+ * Broken / legacy (do not use):
+ * - coding-agent.yml / coding-agent-dispatch.yml (422)
+ * - gold-worker.yml after broken re-registration (422)
+ * - .github/workflows/*.yml path form (404)
  */
-const GOLD_WORKER_WORKFLOW_FILE = '.github/workflows/gold-worker.yml';
-
-function resolveWorkflowRef(): string {
-  // Ignore legacy numeric IDs so an old deployment cannot dispatch the wrong workflow.
-  return GOLD_WORKER_WORKFLOW_FILE;
-}
+const WORKFLOW_FILE = 'personal-ai-agent.yml';
 
 export async function GET() {
   const auth = await requireUser();
@@ -58,8 +63,10 @@ export async function POST(req: NextRequest) {
 
     const controlPlaneRepo =
       process.env.CONTROL_PLANE_REPO || 'shukanwadhawana-cloud/Personal-AI-bot';
-    const workflowRef = resolveWorkflowRef();
-    const dispatchUrl = `https://api.github.com/repos/${controlPlaneRepo}/actions/workflows/${workflowRef}/dispatches`;
+    // Single authoritative identifier — ignore stale env overrides that point
+    // at broken workflow registrations or full path prefixes.
+    const workflowRef = WORKFLOW_FILE;
+    const dispatchUrl = `https://api.github.com/repos/${controlPlaneRepo}/actions/workflows/${encodeURIComponent(workflowRef)}/dispatches`;
 
     const sessionToken = await getToken({
       req,
@@ -116,7 +123,14 @@ export async function POST(req: NextRequest) {
             task.id,
             {
               status: 'FAILED',
-              error: `GitHub Actions dispatch failed (${res.status}) workflow=${workflowRef}. ${responseText.slice(0, 1000)}`,
+              error: [
+                'GitHub Actions dispatch failed',
+                `repository=${controlPlaneRepo}`,
+                `workflow=${workflowRef}`,
+                'ref=main',
+                `status=${res.status}`,
+                `response=${responseText.slice(0, 800)}`,
+              ].join(' | '),
             },
             auth.userId
           );
