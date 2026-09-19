@@ -201,17 +201,22 @@ jobs:
             if [ -f package.json ]; then
               if [ -f pnpm-lock.yaml ]; then
                 corepack enable >/dev/null 2>&1
-                pnpm install --frozen-lockfile || rc=$?
-                [ "$rc" -eq 0 ] && node -e "const p=require('./package.json'); process.exit(p.scripts?.test?0:1)" >/dev/null 2>&1 && pnpm test --if-present || true
+                pnpm install --frozen-lockfile || rc=$?                if [ "$rc" -eq 0 ] && node -e "const p=require('./package.json'); process.exit(p.scripts?.test?0:1)" >/dev/null 2>&1; then
+                  pnpm test --if-present || rc=$?
+                fi
                 [ "$rc" -eq 0 ] && pnpm run build --if-present || rc=$?
               elif [ -f yarn.lock ]; then
                 corepack enable >/dev/null 2>&1
                 yarn install --immutable || rc=$?
-                [ "$rc" -eq 0 ] && yarn test --if-present || true
+                if [ "$rc" -eq 0 ] && node -e "const p=require('./package.json'); process.exit(p.scripts?.test?0:1)" >/dev/null 2>&1; then
+                  yarn test --if-present || rc=$?
+                fi
                 [ "$rc" -eq 0 ] && yarn build --if-present || rc=$?
               else
                 npm ci || rc=$?
-                [ "$rc" -eq 0 ] && npm test --if-present || true
+                if [ "$rc" -eq 0 ] && node -e "const p=require('./package.json'); process.exit(p.scripts?.test?0:1)" >/dev/null 2>&1; then
+                  npm test --if-present || rc=$?
+                fi
                 [ "$rc" -eq 0 ] && npm run build --if-present || rc=$?
               fi
             else
