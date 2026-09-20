@@ -124,6 +124,8 @@ jobs:
           LLM_PROVIDER: ${{ secrets.LLM_PROVIDER }}
           DEEPSEEK_MODEL: ${{ secrets.DEEPSEEK_MODEL }}
           OPENROUTER_MODEL: ${{ secrets.OPENROUTER_MODEL }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GROQ_MODEL: ${{ secrets.GROQ_MODEL }}
           TASK_PROMPT: ${{ inputs.prompt }}
           TASK_ID: ${{ inputs.task_id }}
           GH_TOKEN: ${{ secrets.AGENT_GITHUB_TOKEN != '' && secrets.AGENT_GITHUB_TOKEN || github.token }}
@@ -132,9 +134,6 @@ jobs:
           set -euo pipefail
           git config user.name "Personal-AI-Bot"
           git config user.email "bot@users.noreply.github.com"
-          if [ ! -f .gitignore ] || ! grep -q node_modules/ .gitignore 2>/dev/null; then
-            printf '\nnode_modules/\n.next/\ndist/\nbuild/\n.aider*\n.env\n.env.*\n' >> .gitignore
-          fi
           BRANCH="agent/${TASK_ID}"
           git fetch origin "$BRANCH" 2>/dev/null || true
           if git show-ref --verify --quiet "refs/remotes/origin/$BRANCH"; then
@@ -142,30 +141,51 @@ jobs:
           else
             git checkout -b "$BRANCH"
           fi
-          # Provider selection is secret-driven. OpenRouter free -> DeepSeek -> Gemini in auto mode.
+          # Provider selection is secret-driven. Auto mode uses only explicitly configured providers.
+          # Zero-cost auto order: OpenRouter -> Groq -> Gemini. DeepSeek is opt-in only.
           PROVIDER="${LLM_PROVIDER:-auto}"
           MODEL=""
+          ACTIVE_PROVIDER=""
           export OPENAI_API_BASE=""
           export OPENAI_API_KEY=""
-          if [ "$PROVIDER" = "openrouter" ] || { [ "$PROVIDER" = "auto" ] && [ -n "${OPENROUTER_API_KEY:-}" ]; }; then
-            test -n "${OPENROUTER_API_KEY:-}" || { echo "OPENROUTER_API_KEY is missing"; exit 1; }
-            export OPENAI_API_BASE="https://openrouter.ai/api/v1"
-            export OPENAI_API_KEY="$OPENROUTER_API_KEY"
-            MODEL="openai/${OPENROUTER_MODEL:-openrouter/free}"
-            ACTIVE_PROVIDER="openrouter"
-          elif [ "$PROVIDER" = "deepseek" ] || { [ "$PROVIDER" = "auto" ] && [ -n "${DEEPSEEK_API_KEY:-}" ]; }; then
-            test -n "${DEEPSEEK_API_KEY:-}" || { echo "DEEPSEEK_API_KEY is missing"; exit 1; }
-            export OPENAI_API_BASE="https://api.deepseek.com"
-            export OPENAI_API_KEY="$DEEPSEEK_API_KEY"
-            MODEL="openai/${DEEPSEEK_MODEL:-deepseek-flash}"
-            ACTIVE_PROVIDER="deepseek"
-          elif [ "$PROVIDER" = "gemini" ] || [ "$PROVIDER" = "auto" ]; then
-            test -n "${GEMINI_API_KEY:-}" || { echo "No LLM provider key configured"; exit 1; }
-            unset OPENAI_API_BASE OPENAI_API_KEY
-            MODEL="gemini/gemini-3.6-flash"
-            ACTIVE_PROVIDER="gemini"
+          select_provider() {
+            case "$1" in
+              openrouter)
+                test -n "${OPENROUTER_API_KEY:-}" || return 1
+                export OPENAI_API_BASE="https://openrouter.ai/api/v1"
+                export OPENAI_API_KEY="$OPENROUTER_API_KEY"
+                MODEL="openai/${OPENROUTER_MODEL:-openrouter/free}"
+                ACTIVE_PROVIDER="openrouter"
+                ;;
+              groq)
+                test -n "${GROQ_API_KEY:-}" || return 1
+                export OPENAI_API_BASE="https://api.groq.com/openai/v1"
+                export OPENAI_API_KEY="$GROQ_API_KEY"
+                MODEL="openai/${GROQ_MODEL:-gpt-oss-20b}"
+                ACTIVE_PROVIDER="groq"
+                ;;
+              gemini)
+                test -n "${GEMINI_API_KEY:-}" || return 1
+                unset OPENAI_API_BASE OPENAI_API_KEY
+                MODEL="gemini/gemini-3.6-flash"
+                ACTIVE_PROVIDER="gemini"
+                ;;
+              deepseek)
+                test -n "${DEEPSEEK_API_KEY:-}" || return 1
+                export OPENAI_API_BASE="https://api.deepseek.com"
+                export OPENAI_API_KEY="$DEEPSEEK_API_KEY"
+                MODEL="openai/${DEEPSEEK_MODEL:-deepseek-flash}"
+                ACTIVE_PROVIDER="deepseek"
+                ;;
+              *) return 1 ;;
+            esac
+          }
+          if [ "$PROVIDER" = "auto" ]; then
+            select_provider openrouter || select_provider groq || select_provider gemini || { echo "No zero-cost LLM provider key configured"; exit 1; }
+          elif [ "$PROVIDER" = "deepseek" ]; then
+            select_provider deepseek || { echo "DEEPSEEK_API_KEY is missing"; exit 1; }
           else
-            echo "Unsupported LLM_PROVIDER=$PROVIDER"; exit 1
+            select_provider "$PROVIDER" || { echo "Requested provider $PROVIDER is not configured"; exit 1; }
           fi
           echo "Using provider $ACTIVE_PROVIDER with model $MODEL"
           echo "=== repository diagnostics ==="
@@ -178,25 +198,37 @@ jobs:
           git status --short | head -n 30 || true
           echo "=== end diagnostics ==="
           BASELINE_SHA=$(git rev-parse HEAD)
+          MAX_LLM_CALLS=4
+          LLM_CALLS=0
           run_aider() {
+            if [ "$LLM_CALLS" -ge "$MAX_LLM_CALLS" ]; then
+              echo "LLM call budget exhausted ($MAX_LLM_CALLS); refusing another request."
+              return 2
+            fi
+            LLM_CALLS=$((LLM_CALLS + 1))
+            echo "LLM_CALL=$LLM_CALLS/$MAX_LLM_CALLS provider=$ACTIVE_PROVIDER model=$MODEL"
             set +e
-            AIDER_OUTPUT=$(printf '%s' "$1" | aider --yes --no-auto-commits --model "$MODEL" --message-file /dev/stdin 2>&1)
+            AIDER_OUTPUT=$(printf "%s" "$1" | aider --yes --no-auto-commits --model "$MODEL" --message-file /dev/stdin 2>&1)
             AIDER_RC=$?
             set -e
-            printf '%s\n' "$AIDER_OUTPUT"
+            printf "%s\n" "$AIDER_OUTPUT"
             return "$AIDER_RC"
           }
           run_aider "$TASK_PROMPT" || {
-            if printf '%s' "$AIDER_OUTPUT" | grep -Eqi '429|quota|rate.?limit|resource.?exhausted|503|high demand'; then
-              if [ "$ACTIVE_PROVIDER" != "deepseek" ] && [ -n "${DEEPSEEK_API_KEY:-}" ]; then
-                export OPENAI_API_BASE="https://api.deepseek.com"; export OPENAI_API_KEY="$DEEPSEEK_API_KEY"; MODEL="openai/${DEEPSEEK_MODEL:-deepseek-flash}"; ACTIVE_PROVIDER="deepseek"
-              elif [ "$ACTIVE_PROVIDER" != "openrouter" ] && [ -n "${OPENROUTER_API_KEY:-}" ]; then
-                export OPENAI_API_BASE="https://openrouter.ai/api/v1"; export OPENAI_API_KEY="$OPENROUTER_API_KEY"; MODEL="openai/${OPENROUTER_MODEL:-openrouter/free}"; ACTIVE_PROVIDER="openrouter"
-              else
-                echo "No alternate provider configured; refusing repeated quota-consuming retries."; exit 1
+            if printf "%s" "$AIDER_OUTPUT" | grep -Eqi "429|quota|rate.?limit|resource.?exhausted|503|high demand|temporarily unavailable"; then
+              FALLBACK_OK=0
+              if [ "$ACTIVE_PROVIDER" = "openrouter" ]; then
+                select_provider groq && FALLBACK_OK=1 || true
+              elif [ "$ACTIVE_PROVIDER" = "groq" ]; then
+                select_provider gemini && FALLBACK_OK=1 || true
               fi
-              echo "Switching to fallback provider $ACTIVE_PROVIDER with model $MODEL"
-              run_aider "$TASK_PROMPT" || exit 1
+              if [ "$FALLBACK_OK" -eq 1 ]; then
+                echo "Switching to fallback provider $ACTIVE_PROVIDER with model $MODEL"
+                run_aider "$TASK_PROMPT" || exit 1
+              else
+                echo "No alternate provider configured; refusing repeated quota-consuming retries."
+                exit 1
+              fi
             else
               exit 1
             fi
@@ -296,6 +328,9 @@ jobs:
           echo "has_changes=true" >> "$GITHUB_OUTPUT"
           echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
           echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "llm_calls=$LLM_CALLS" >> "$GITHUB_OUTPUT"
+          echo "provider=$ACTIVE_PROVIDER" >> "$GITHUB_OUTPUT"
+          echo "model=$MODEL" >> "$GITHUB_OUTPUT"
 
       - name: Create Pull Request
         id: pr
@@ -334,13 +369,16 @@ jobs:
           JOB_STATUS: ${{ job.status }}
           PR_URL: ${{ steps.pr.outputs.pull-request-url }}
           COMMIT_SHA: ${{ steps.agent.outputs.commit }}
+          LLM_CALLS: ${{ steps.agent.outputs.llm_calls }}
+          PROVIDER: ${{ steps.agent.outputs.provider }}
+          MODEL: ${{ steps.agent.outputs.model }}
         run: |
           set -uo pipefail
           STATUS=FAILED
           if [ "$JOB_STATUS" = "success" ]; then
             if [ -n "${PR_URL:-}" ]; then STATUS=PR_CREATED; else STATUS=COMPLETED; fi
           fi
-          PAYLOAD=$(jq -n --arg status "$STATUS" --arg run "$RUN_ID" --arg commit "${COMMIT_SHA:-}" --arg pr "${PR_URL:-}" '{status:$status,workerRunId:$run,commitSha:$commit,prUrl:$pr}')
+          PAYLOAD=$(jq -n --arg status "$STATUS" --arg run "$RUN_ID" --arg commit "${COMMIT_SHA:-}" --arg pr "${PR_URL:-}" --arg calls "${LLM_CALLS:-0}" --arg provider "${PROVIDER:-unknown}" --arg model "${MODEL:-unknown}" '{status:$status,workerRunId:$run,commitSha:$commit,prUrl:$pr,llmCalls:$calls,provider:$provider,model:$model}')
           URL="$CALLBACK_URL"
           if [ -n "${VERCEL_BYPASS_SECRET:-}" ]; then
             case "$URL" in
