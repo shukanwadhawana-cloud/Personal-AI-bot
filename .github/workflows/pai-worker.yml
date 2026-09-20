@@ -112,6 +112,7 @@ jobs:
           set -euo pipefail
           gh api "repos/${{ github.repository }}/contents/.github/scripts/task-acceptance-gate.py?ref=${{ github.sha }}" --jq .content | base64 --decode > /tmp/task-acceptance-gate.py
           test -s /tmp/task-acceptance-gate.py
+          python /tmp/task-acceptance-gate.py --self-test
           echo "acceptance_gate_ref=${{ github.sha }}"
 
       - name: Execute agent
@@ -212,7 +213,7 @@ jobs:
               acceptance_passed=1
               break
             fi
-            if [ "$acceptance_attempt" -lt 3 ]; then
+            if [ "$acceptance_attempt" -lt 2 ]; then
               run_aider "Acceptance failed. Original task: $TASK_PROMPT. Evidence: $ACCEPTANCE_OUTPUT. Implement the original task in this repository." || { echo "Acceptance retry failed; stopping to protect quota."; break; }
             fi
           done
