@@ -141,23 +141,23 @@ jobs:
           else
             git checkout -b "$BRANCH"
           fi
-          # Provider selection is secret-driven. DeepSeek -> OpenRouter -> Gemini in auto mode.
+          # Provider selection is secret-driven. OpenRouter free -> DeepSeek -> Gemini in auto mode.
           PROVIDER="${LLM_PROVIDER:-auto}"
           MODEL=""
           export OPENAI_API_BASE=""
           export OPENAI_API_KEY=""
-          if [ "$PROVIDER" = "deepseek" ] || { [ "$PROVIDER" = "auto" ] && [ -n "${DEEPSEEK_API_KEY:-}" ]; }; then
-            test -n "${DEEPSEEK_API_KEY:-}" || { echo "DEEPSEEK_API_KEY is missing"; exit 1; }
-            export OPENAI_API_BASE="https://api.deepseek.com"
-            export OPENAI_API_KEY="$DEEPSEEK_API_KEY"
-            MODEL="openai/${DEEPSEEK_MODEL:-deepseek-flash}"
-            ACTIVE_PROVIDER="deepseek"
-          elif [ "$PROVIDER" = "openrouter" ] || { [ "$PROVIDER" = "auto" ] && [ -n "${OPENROUTER_API_KEY:-}" ]; }; then
+          if [ "$PROVIDER" = "openrouter" ] || { [ "$PROVIDER" = "auto" ] && [ -n "${OPENROUTER_API_KEY:-}" ]; }; then
             test -n "${OPENROUTER_API_KEY:-}" || { echo "OPENROUTER_API_KEY is missing"; exit 1; }
             export OPENAI_API_BASE="https://openrouter.ai/api/v1"
             export OPENAI_API_KEY="$OPENROUTER_API_KEY"
             MODEL="openai/${OPENROUTER_MODEL:-openrouter/free}"
             ACTIVE_PROVIDER="openrouter"
+          elif [ "$PROVIDER" = "deepseek" ] || { [ "$PROVIDER" = "auto" ] && [ -n "${DEEPSEEK_API_KEY:-}" ]; }; then
+            test -n "${DEEPSEEK_API_KEY:-}" || { echo "DEEPSEEK_API_KEY is missing"; exit 1; }
+            export OPENAI_API_BASE="https://api.deepseek.com"
+            export OPENAI_API_KEY="$DEEPSEEK_API_KEY"
+            MODEL="openai/${DEEPSEEK_MODEL:-deepseek-flash}"
+            ACTIVE_PROVIDER="deepseek"
           elif [ "$PROVIDER" = "gemini" ] || [ "$PROVIDER" = "auto" ]; then
             test -n "${GEMINI_API_KEY:-}" || { echo "No LLM provider key configured"; exit 1; }
             unset OPENAI_API_BASE OPENAI_API_KEY
