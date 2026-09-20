@@ -101,7 +101,7 @@ The worker now supports multiple Aider-compatible providers and automatically av
 
 ### Recommended for the ₹0 goal: OpenRouter Free
 
-OpenRouter currently provides a free tier with free models and an `openrouter/free` router. Its current free-plan limit is 50 requests/day and 20 requests/minute, so it is still rate-limited, but it does not require paid inference for the free models. citeturn2search0turn2search2
+OpenRouter currently provides a free tier with free models and an `openrouter/free` router. Its current free-plan limit is 50 requests/day and 20 requests/minute, so it is still rate-limited, but the listed free models are priced at $0.
 
 Create an OpenRouter API key at https://openrouter.ai and add this **GitHub Actions secret**:
 
@@ -112,7 +112,7 @@ Create an OpenRouter API key at https://openrouter.ai and add this **GitHub Acti
 
 ### DeepSeek fallback
 
-DeepSeek is now supported through Aider's OpenAI-compatible interface. Its current API is usage-priced, so **do not add `DEEPSEEK_API_KEY` if strict ₹0 operation is mandatory**. If you later choose to use it, add the secret and the worker can switch to it when the free provider is unavailable. citeturn0search0turn0search3
+DeepSeek is now supported through Aider's OpenAI-compatible interface. Its current API is usage-priced, so **do not add `DEEPSEEK_API_KEY` if strict ₹0 operation is mandatory**. If you later choose to use it, add the secret and the worker can switch to it when the free provider is unavailable.
 
 | Secret | Value |
 |---|---|
