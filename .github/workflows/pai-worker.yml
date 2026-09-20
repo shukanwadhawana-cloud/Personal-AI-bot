@@ -84,10 +84,42 @@ jobs:
           head -c 400 /tmp/cb.txt || true
           echo
 
+      - name: Prepare writable target repository
+        id: prepare
+        env:
+          TARGET_REPO: ${{ inputs.target_repo }}
+          GH_TOKEN: ${{ secrets.AGENT_GITHUB_TOKEN != '' && secrets.AGENT_GITHUB_TOKEN || github.token }}
+        run: |
+          set -euo pipefail
+          AGENT_OWNER=$(gh api user --jq .login)
+          UPSTREAM_OWNER=${TARGET_REPO%%/*}
+          REPO_NAME=${TARGET_REPO#*/}
+          if [ -z "$UPSTREAM_OWNER" ] || [ -z "$REPO_NAME" ] || [ "$TARGET_REPO" = "$REPO_NAME" ]; then echo "Invalid target repository: $TARGET_REPO"; exit 1; fi
+          if [ "$AGENT_OWNER" = "$UPSTREAM_OWNER" ]; then
+            WRITABLE_REPO="$TARGET_REPO"
+            echo "Target repository is already owned by authenticated user: $WRITABLE_REPO"
+          else
+            WRITABLE_REPO="$AGENT_OWNER/$REPO_NAME"
+            if gh repo view "$WRITABLE_REPO" >/dev/null 2>&1; then
+              echo "Using existing fork: $WRITABLE_REPO"
+            else
+              echo "Creating fork: $WRITABLE_REPO"
+              gh api --method POST "repos/$TARGET_REPO/forks" -f name="$REPO_NAME" >/tmp/fork.json
+            fi
+            for attempt in 1 2 3 4 5 6 7 8 9 10; do
+              if gh repo view "$WRITABLE_REPO" >/dev/null 2>&1; then break; fi
+              echo "Waiting for fork to become available (attempt $attempt/10)..."
+              sleep 3
+            done
+            gh repo view "$WRITABLE_REPO" >/dev/null
+          fi
+          echo "target_repo=$WRITABLE_REPO" >> "$GITHUB_OUTPUT"
+          echo "upstream_repo=$TARGET_REPO" >> "$GITHUB_OUTPUT"
+
       - name: Checkout target repository
         uses: actions/checkout@v4
         with:
-          repository: ${{ inputs.target_repo }}
+          repository: ${{ steps.prepare.outputs.target_repo }}
           token: ${{ secrets.AGENT_GITHUB_TOKEN != '' && secrets.AGENT_GITHUB_TOKEN || github.token }}
           path: workspace
           ref: ${{ inputs.target_branch }}
@@ -127,20 +159,29 @@ jobs:
           TASK_PROMPT: ${{ inputs.prompt }}
           TASK_ID: ${{ inputs.task_id }}
           GH_TOKEN: ${{ secrets.AGENT_GITHUB_TOKEN != '' && secrets.AGENT_GITHUB_TOKEN || github.token }}
+          UPSTREAM_REPO: ${{ inputs.target_repo }}
+          WRITABLE_REPO: ${{ steps.prepare.outputs.target_repo }}
+          TARGET_BRANCH: ${{ inputs.target_branch }}
         working-directory: workspace
         run: |
           set -euo pipefail
           git config user.name "Personal-AI-Bot"
           git config user.email "bot@users.noreply.github.com"
-          if [ ! -f .gitignore ] || ! grep -q node_modules/ .gitignore 2>/dev/null; then
-            printf '\nnode_modules/\n.next/\ndist/\nbuild/\n.aider*\n.env\n.env.*\n' >> .gitignore
-          fi
           BRANCH="agent/${TASK_ID}"
+          if [ "$WRITABLE_REPO" != "$UPSTREAM_REPO" ]; then
+            git remote add upstream "https://github.com/$UPSTREAM_REPO.git" 2>/dev/null || true
+            git fetch upstream "$TARGET_BRANCH"
+            git checkout -B "$BRANCH" "upstream/$TARGET_BRANCH"
+          fi
           git fetch origin "$BRANCH" 2>/dev/null || true
-          if git show-ref --verify --quiet "refs/remotes/origin/$BRANCH"; then
+          if [ "$WRITABLE_REPO" = "$UPSTREAM_REPO" ]; then
+            if git show-ref --verify --quiet "refs/remotes/origin/$BRANCH"; then
+              git checkout -B "$BRANCH" "origin/$BRANCH"
+            elif ! git rev-parse --verify HEAD >/dev/null 2>&1; then
+              git checkout -b "$BRANCH"
+            fi
+          elif git show-ref --verify --quiet "refs/remotes/origin/$BRANCH"; then
             git checkout -B "$BRANCH" "origin/$BRANCH"
-          else
-            git checkout -b "$BRANCH"
           fi
           # Provider selection is secret-driven. OpenRouter free -> DeepSeek -> Gemini in auto mode.
           PROVIDER="${LLM_PROVIDER:-auto}"
