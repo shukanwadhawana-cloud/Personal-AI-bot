@@ -110,17 +110,33 @@ jobs:
           else
             WRITABLE_REPO="$AGENT_OWNER/$REPO_NAME"
             if gh repo view "$WRITABLE_REPO" >/dev/null 2>&1; then
-              echo "Using existing fork: $WRITABLE_REPO"
+              echo "Repository already exists: $WRITABLE_REPO"
+              EXISTING_PARENT=$(gh api "repos/$WRITABLE_REPO" --jq '.parent.full_name // empty')
+              if [ "$EXISTING_PARENT" != "$TARGET_REPO" ]; then
+                echo "ERROR: $WRITABLE_REPO exists but is not a fork of $TARGET_REPO (parent=$EXISTING_PARENT)"
+                exit 1
+              fi
+              echo "Verified existing fork: $WRITABLE_REPO <- $TARGET_REPO"
             else
               echo "Creating fork: $WRITABLE_REPO"
               gh api --method POST "repos/$TARGET_REPO/forks" -f name="$REPO_NAME" >/tmp/fork.json
             fi
             for attempt in 1 2 3 4 5 6 7 8 9 10; do
-              if gh repo view "$WRITABLE_REPO" >/dev/null 2>&1; then break; fi
-              echo "Waiting for fork to become available (attempt $attempt/10)..."
+              if gh repo view "$WRITABLE_REPO" >/dev/null 2>&1; then
+                EXISTING_PARENT=$(gh api "repos/$WRITABLE_REPO" --jq '.parent.full_name // empty')
+                if [ "$EXISTING_PARENT" = "$TARGET_REPO" ]; then
+                  echo "Verified fork is ready: $WRITABLE_REPO <- $TARGET_REPO"
+                  break
+                fi
+              fi
+              echo "Waiting for valid fork to become available (attempt $attempt/10)..."
               sleep 3
             done
-            gh repo view "$WRITABLE_REPO" >/dev/null
+            FINAL_PARENT=$(gh api "repos/$WRITABLE_REPO" --jq '.parent.full_name // empty')
+            test "$FINAL_PARENT" = "$TARGET_REPO" || {
+              echo "ERROR: writable repository is not verified as a fork of $TARGET_REPO (parent=$FINAL_PARENT)"
+              exit 1
+            }
           fi
           echo "target_repo=$WRITABLE_REPO" >> "$GITHUB_OUTPUT"
           echo "upstream_repo=$TARGET_REPO" >> "$GITHUB_OUTPUT"
