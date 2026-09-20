@@ -101,7 +101,7 @@ The worker now supports multiple Aider-compatible providers and automatically av
 
 ### Recommended for the ₹0 goal: OpenRouter Free
 
-OpenRouter currently provides a free tier with free models and an `openrouter/free` router. Its current free-plan limit is 50 requests/day and 20 requests/minute, so it is still rate-limited, but the listed free models are priced at $0.
+OpenRouter provides a free tier with free models and an `openrouter/free` router. Free-plan limits can change, so treat it as rate-limited rather than unlimited.
 
 Create an OpenRouter API key at https://openrouter.ai and add this **GitHub Actions secret**:
 
@@ -109,6 +109,19 @@ Create an OpenRouter API key at https://openrouter.ai and add this **GitHub Acti
 |---|---|
 | `OPENROUTER_API_KEY` | Your OpenRouter key |
 | `OPENROUTER_MODEL` | Optional; defaults to `openrouter/free` |
+
+### Groq fallback (zero-cost tier)
+
+Groq exposes an OpenAI-compatible API at `https://api.groq.com/openai/v1`. The worker can use an explicitly configured Groq key as a second zero-cost provider. Available models and limits change over time; the worker defaults to `gpt-oss-20b` and does not assume unlimited usage.
+
+Add this **GitHub Actions secret** if you want Groq enabled:
+
+| Secret | Value |
+|---|---|
+| `GROQ_API_KEY` | Your Groq key |
+| `GROQ_MODEL` | Optional; defaults to `gpt-oss-20b` |
+
+Groq is not automatically upgraded to a paid tier by this project. Paid usage requires you to explicitly configure a paid account/provider yourself.
 
 ### DeepSeek fallback
 
@@ -132,10 +145,10 @@ Your existing Gemini secret remains supported:
 Leave `LLM_PROVIDER` unset for automatic selection:
 
 ``
-OpenRouter Free → DeepSeek (only if configured) → Gemini
+OpenRouter Free → Groq (if configured) → Gemini
 ``
 
-You can also force one provider with the optional Actions secret `LLM_PROVIDER` set to `openrouter`, `deepseek`, or `gemini`.
+You can also force one provider with the optional Actions secret `LLM_PROVIDER` set to `openrouter`, `groq`, `gemini`, or the explicitly opt-in `deepseek` provider.
 
 **Important:** the worker will not invent or create billing credentials. A paid provider is used only when its corresponding secret is explicitly supplied.
 
@@ -173,6 +186,8 @@ Repository → **Settings → Secrets and variables → Actions → New reposito
 |------|--------------|----------|
 | `OPENROUTER_API_KEY` | OpenRouter free key (step 5) | Recommended for ₹0 operation |
 | `OPENROUTER_MODEL` | optional; defaults to `openrouter/free` | Optional |
+| `GROQ_API_KEY` | Groq key (optional) | Optional |
+| `GROQ_MODEL` | optional; defaults to `gpt-oss-20b` | Optional |
 | `DEEPSEEK_API_KEY` | optional DeepSeek key | Optional; usage-priced |
 | `DEEPSEEK_MODEL` | optional; defaults to `deepseek-flash` | Optional |
 | `LLM_API_KEY` | existing Gemini key | Optional fallback |
@@ -295,7 +310,7 @@ A task is **QUEUED** until the GitHub Actions worker sends its first callback. T
 
 If GitHub OAuth is used for dispatch, re-authorize the app after changing its scope so the account receives the `workflow` scope. For cross-repository worker checkout/push, add the same fine-grained `AGENT_GITHUB_TOKEN` as an **Actions repository secret**; the built-in `GITHUB_TOKEN` is scoped to the control-plane repository.
 
-The worker changes a task to RUNNING only after its `Report RUNNING` callback succeeds.
+The worker changes a task to RUNNING only after its `Report RUNNING` callback succeeds. The worker also enforces a per-task LLM call budget and records provider/model/call-count metadata in the final callback.
 
 ### Jobs fail in seconds with no logs / runner_id 0
 

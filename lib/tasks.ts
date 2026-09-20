@@ -42,6 +42,9 @@ export interface Task {
   commitSha?: string;
   prUrl?: string;
   deploymentUrl?: string;
+  llmCalls?: number;
+  provider?: string;
+  model?: string;
   steps: TaskStep[];
 }
 
@@ -79,6 +82,9 @@ function rowToTask(row: any): Task {
     commitSha: row.commit_sha ?? undefined,
     prUrl: row.pr_url ?? undefined,
     deploymentUrl: row.deployment_url ?? undefined,
+    llmCalls: row.llm_calls == null ? undefined : Number(row.llm_calls),
+    provider: row.provider ?? undefined,
+    model: row.model ?? undefined,
     steps: Array.isArray(row.steps) ? row.steps : (typeof row.steps === 'string' ? JSON.parse(row.steps || '[]') : []),
   };
 }
@@ -201,6 +207,9 @@ export async function updateTask(
         commit_sha = ${next.commitSha ?? null},
         pr_url = ${next.prUrl ?? null},
         deployment_url = ${next.deploymentUrl ?? null},
+        llm_calls = ${next.llmCalls ?? null},
+        provider = ${next.provider ?? null},
+        model = ${next.model ?? null},
         worker_run_id = ${next.workerRunId ?? null},
         error = ${next.error ?? null},
         result = ${next.result ?? null},
