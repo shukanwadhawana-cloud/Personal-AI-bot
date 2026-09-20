@@ -15,6 +15,10 @@ Mobile-controllable coding agent that continues after you lock your iPhone.
 | Live deployment | **Requires your Neon + Vercel + secrets** |
 | Real iPhone E2E | **Blocked on user configuration** |
 
+## OpenRouter Worker Test
+
+The GitHub Actions worker can use OpenRouter as its primary free-tier LLM provider. OpenRouter provides access to multiple models with a generous free tier, making it an ideal choice for cost-effective AI processing in the worker. The worker is configured to leverage OpenRouter's API for model inference, enabling efficient task execution without incurring additional costs beyond the free tier limits.
+
 ## Architecture
 
 ```
