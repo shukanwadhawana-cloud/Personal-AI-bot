@@ -79,6 +79,24 @@ CONTEXTUAL_SEGMENT_BLOCKLIST = {
     "frontend",
 }
 
+
+# Common technology/framework names that contain a dot but are not filesystem paths.
+# These must never become required paths unless the prompt explicitly identifies them
+# as a filename/path (for example, by using a path root, quotes, or "file named").
+TECHNOLOGY_DOTTED_NAMES = {
+    "next.js",
+    "nuxt.js",
+    "vue.js",
+    "node.js",
+    "react.js",
+    "express.js",
+    "nest.js",
+    "angular.js",
+    "three.js",
+    "d3.js",
+    "socket.io",
+}
+
 KNOWN_SOURCE_ROOTS = (
     "src/",
     "app/",
@@ -197,9 +215,13 @@ def is_plausible_filesystem_path(path: str) -> bool:
         return False
     if looks_like_url(path) or is_owner_repo(path) or is_conceptual_slash_phrase(path):
         return False
+    lower = path.lower().strip("/")
+    # A bare dotted technology name such as "Next.js" is prose, not a path.
+    # Real dotted files (README.md, package.json, app.tsx, etc.) remain valid.
+    if "/" not in lower and lower in TECHNOLOGY_DOTTED_NAMES:
+        return False
     if has_file_extension(path):
         return True
-    lower = path.lower()
     return any(lower.startswith(root) for root in KNOWN_SOURCE_ROOTS)
 
 
@@ -352,7 +374,22 @@ def collect_git_changes(baseline: str) -> List[str]:
     return sorted({p for p in tracked + untracked if p})
 
 
+
+def _self_test() -> None:
+    """Regression checks for prose terms being mistaken for filesystem paths."""
+    passed, _, diag = evaluate(
+        "Add a short Architecture overview to README.md describing the Next.js/Vercel control plane and Neon.",
+        ["README.md"],
+    )
+    assert passed, diag
+    assert diag["required_paths"] == ["README.md"], diag
+
+
 def main(argv: Sequence[str]) -> int:
+    if len(argv) == 2 and argv[1] == "--self-test":
+        _self_test()
+        print("ACCEPTANCE_SELF_TEST=PASS")
+        return 0
     if len(argv) < 3:
         print("Usage: task-acceptance-gate.py <prompt> <baseline_sha>", file=sys.stderr)
         return 2
