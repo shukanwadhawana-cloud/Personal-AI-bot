@@ -118,6 +118,11 @@ jobs:
         id: agent
         env:
           GEMINI_API_KEY: ${{ secrets.LLM_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          LLM_PROVIDER: ${{ secrets.LLM_PROVIDER }}
+          DEEPSEEK_MODEL: ${{ secrets.DEEPSEEK_MODEL }}
+          OPENROUTER_MODEL: ${{ secrets.OPENROUTER_MODEL }}
           TASK_PROMPT: ${{ inputs.prompt }}
           TASK_ID: ${{ inputs.task_id }}
           GH_TOKEN: ${{ secrets.AGENT_GITHUB_TOKEN != '' && secrets.AGENT_GITHUB_TOKEN || github.token }}
@@ -136,9 +141,32 @@ jobs:
           else
             git checkout -b "$BRANCH"
           fi
-          test -n "${GEMINI_API_KEY:-}" || { echo "LLM_API_KEY is missing"; exit 1; }
-          MODEL="gemini/gemini-3.6-flash"
-          echo "Using model $MODEL"
+          # Provider selection is secret-driven. DeepSeek -> OpenRouter -> Gemini in auto mode.
+          PROVIDER="${LLM_PROVIDER:-auto}"
+          MODEL=""
+          export OPENAI_API_BASE=""
+          export OPENAI_API_KEY=""
+          if [ "$PROVIDER" = "deepseek" ] || { [ "$PROVIDER" = "auto" ] && [ -n "${DEEPSEEK_API_KEY:-}" ]; }; then
+            test -n "${DEEPSEEK_API_KEY:-}" || { echo "DEEPSEEK_API_KEY is missing"; exit 1; }
+            export OPENAI_API_BASE="https://api.deepseek.com"
+            export OPENAI_API_KEY="$DEEPSEEK_API_KEY"
+            MODEL="openai/${DEEPSEEK_MODEL:-deepseek-flash}"
+            ACTIVE_PROVIDER="deepseek"
+          elif [ "$PROVIDER" = "openrouter" ] || { [ "$PROVIDER" = "auto" ] && [ -n "${OPENROUTER_API_KEY:-}" ]; }; then
+            test -n "${OPENROUTER_API_KEY:-}" || { echo "OPENROUTER_API_KEY is missing"; exit 1; }
+            export OPENAI_API_BASE="https://openrouter.ai/api/v1"
+            export OPENAI_API_KEY="$OPENROUTER_API_KEY"
+            MODEL="openai/${OPENROUTER_MODEL:-openrouter/free}"
+            ACTIVE_PROVIDER="openrouter"
+          elif [ "$PROVIDER" = "gemini" ] || [ "$PROVIDER" = "auto" ]; then
+            test -n "${GEMINI_API_KEY:-}" || { echo "No LLM provider key configured"; exit 1; }
+            unset OPENAI_API_BASE OPENAI_API_KEY
+            MODEL="gemini/gemini-3.6-flash"
+            ACTIVE_PROVIDER="gemini"
+          else
+            echo "Unsupported LLM_PROVIDER=$PROVIDER"; exit 1
+          fi
+          echo "Using provider $ACTIVE_PROVIDER with model $MODEL"
           echo "=== repository diagnostics ==="
           echo "cwd=$(pwd)"
           echo "git_root=$(git rev-parse --show-toplevel)"
@@ -149,9 +177,31 @@ jobs:
           git status --short | head -n 30 || true
           echo "=== end diagnostics ==="
           BASELINE_SHA=$(git rev-parse HEAD)
-          printf '%s' "$TASK_PROMPT" | aider --yes --no-auto-commits --model "$MODEL" --message-file /dev/stdin
+          run_aider() {
+            set +e
+            AIDER_OUTPUT=$(printf '%s' "$1" | aider --yes --no-auto-commits --model "$MODEL" --message-file /dev/stdin 2>&1)
+            AIDER_RC=$?
+            set -e
+            printf '%s\n' "$AIDER_OUTPUT"
+            return "$AIDER_RC"
+          }
+          run_aider "$TASK_PROMPT" || {
+            if printf '%s' "$AIDER_OUTPUT" | grep -Eqi '429|quota|rate.?limit|resource.?exhausted|503|high demand'; then
+              if [ "$ACTIVE_PROVIDER" != "deepseek" ] && [ -n "${DEEPSEEK_API_KEY:-}" ]; then
+                export OPENAI_API_BASE="https://api.deepseek.com"; export OPENAI_API_KEY="$DEEPSEEK_API_KEY"; MODEL="openai/${DEEPSEEK_MODEL:-deepseek-flash}"; ACTIVE_PROVIDER="deepseek"
+              elif [ "$ACTIVE_PROVIDER" != "openrouter" ] && [ -n "${OPENROUTER_API_KEY:-}" ]; then
+                export OPENAI_API_BASE="https://openrouter.ai/api/v1"; export OPENAI_API_KEY="$OPENROUTER_API_KEY"; MODEL="openai/${OPENROUTER_MODEL:-openrouter/free}"; ACTIVE_PROVIDER="openrouter"
+              else
+                echo "No alternate provider configured; refusing repeated quota-consuming retries."; exit 1
+              fi
+              echo "Switching to fallback provider $ACTIVE_PROVIDER with model $MODEL"
+              run_aider "$TASK_PROMPT" || exit 1
+            else
+              exit 1
+            fi
+          }
           acceptance_passed=0
-          for acceptance_attempt in 1 2 3; do
+          for acceptance_attempt in 1 2; do
             echo "=== Acceptance attempt $acceptance_attempt ==="
             set +e
             ACCEPTANCE_OUTPUT=$(python /tmp/task-acceptance-gate.py "$TASK_PROMPT" "$BASELINE_SHA" 2>&1)
@@ -163,7 +213,7 @@ jobs:
               break
             fi
             if [ "$acceptance_attempt" -lt 3 ]; then
-              printf '%s' "Acceptance failed. Original task: $TASK_PROMPT. Evidence: $ACCEPTANCE_OUTPUT. Implement the original task in this repository." | aider --yes --no-auto-commits --model "$MODEL" --message-file /dev/stdin
+              run_aider "Acceptance failed. Original task: $TASK_PROMPT. Evidence: $ACCEPTANCE_OUTPUT. Implement the original task in this repository." || { echo "Acceptance retry failed; stopping to protect quota."; break; }
             fi
           done
           test "$acceptance_passed" -eq 1 || { echo "Acceptance failed after retries"; exit 1; }
