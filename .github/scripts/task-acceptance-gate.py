@@ -293,6 +293,28 @@ def read_file_content(path: str) -> Optional[str]:
         return None
 
 
+def has_strict_change_scope(prompt: str) -> bool:
+    """Return True when the prompt explicitly limits the allowed file changes."""
+    p = prompt.lower()
+    scope_phrases = (
+        "do not modify, delete, reorder, or reformat any existing files",
+        "do not modify any existing files",
+        "do not modify existing files",
+        "only modify",
+        "only create",
+        "only change",
+        "no other files",
+        "nothing else",
+        "do not modify any other files",
+        "do not change any other files",
+    )
+    return any(phrase in p for phrase in scope_phrases)
+
+
+def is_allowed_change(path: str, required_paths: Set[str]) -> bool:
+    return any(path_satisfied(expected, [path]) for expected in required_paths)
+
+
 def evaluate(
     prompt: str,
     changed: Sequence[str],
@@ -307,6 +329,15 @@ def evaluate(
     missing = sorted(p for p in required_paths if not path_satisfied(p, changed_list))
 
     reasons: List[str] = []
+    if has_strict_change_scope(prompt) and required_paths:
+        unexpected = sorted(
+            p for p in changed_list if not is_allowed_change(p, required_paths)
+        )
+        if unexpected:
+            reasons.append(
+                "The prompt restricts changes to the explicitly requested path(s), "
+                "but unexpected file(s) changed: " + ", ".join(unexpected[:12])
+            )
     if not changed_list:
         reasons.append("No repository changes were produced.")
 
@@ -383,6 +414,17 @@ def _self_test() -> None:
     )
     assert passed, diag
     assert diag["required_paths"] == ["README.md"], diag
+
+    strict_prompt = (
+        "Create diagnostics/OPENROUTER_E2E.md. "
+        "Do not modify, delete, reorder, or reformat any existing files."
+    )
+    passed, reasons, diag = evaluate(
+        strict_prompt,
+        ["diagnostics/OPENROUTER_E2E.md", "package-lock.json"],
+    )
+    assert not passed, (reasons, diag)
+    assert any("unexpected file(s) changed" in r for r in reasons), reasons
 
 
 def main(argv: Sequence[str]) -> int:
