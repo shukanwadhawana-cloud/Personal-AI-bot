@@ -95,20 +95,49 @@ For the worker to checkout/push **other** repositories, also add the same token 
 
 ---
 
-## 5. Free LLM key (for the worker)
+## 5. LLM provider setup — zero-cost first
 
-Pick one free provider and create an API key (do this yourself):
+The worker now supports multiple Aider-compatible providers and automatically avoids repeatedly retrying a quota-exhausted provider.
 
-- Groq: https://console.groq.com  
-- Google AI Studio (Gemini): https://aistudio.google.com  
-- OpenRouter free models: https://openrouter.ai  
+### Recommended for the ₹0 goal: OpenRouter Free
 
-The key becomes `LLM_API_KEY`.  
-Goes into: **GitHub Actions secrets only** (not Vercel).
+OpenRouter currently provides a free tier with free models and an `openrouter/free` router. Its current free-plan limit is 50 requests/day and 20 requests/minute, so it is still rate-limited, but it does not require paid inference for the free models. citeturn2search0turn2search2
 
-Optional companions:
-- `LLM_BASE_URL` — e.g. `https://api.groq.com/openai/v1`
-- `LLM_MODEL` — e.g. the model name your provider documents
+Create an OpenRouter API key at https://openrouter.ai and add this **GitHub Actions secret**:
+
+| Secret | Value |
+|---|---|
+| `OPENROUTER_API_KEY` | Your OpenRouter key |
+| `OPENROUTER_MODEL` | Optional; defaults to `openrouter/free` |
+
+### DeepSeek fallback
+
+DeepSeek is now supported through Aider's OpenAI-compatible interface. Its current API is usage-priced, so **do not add `DEEPSEEK_API_KEY` if strict ₹0 operation is mandatory**. If you later choose to use it, add the secret and the worker can switch to it when the free provider is unavailable. citeturn0search0turn0search3
+
+| Secret | Value |
+|---|---|
+| `DEEPSEEK_API_KEY` | DeepSeek API key (optional) |
+| `DEEPSEEK_MODEL` | Optional; defaults to `deepseek-flash` |
+
+### Gemini remains a fallback
+
+Your existing Gemini secret remains supported:
+
+| Secret | Value |
+|---|---|
+| `LLM_API_KEY` | Existing Gemini key |
+
+### Provider selection
+
+Leave `LLM_PROVIDER` unset for automatic selection:
+
+``
+OpenRouter Free → DeepSeek (only if configured) → Gemini
+``
+
+You can also force one provider with the optional Actions secret `LLM_PROVIDER` set to `openrouter`, `deepseek`, or `gemini`.
+
+**Important:** the worker will not invent or create billing credentials. A paid provider is used only when its corresponding secret is explicitly supplied.
 
 ---
 
@@ -142,9 +171,12 @@ Repository → **Settings → Secrets and variables → Actions → New reposito
 
 | Name | Value source | Required |
 |------|--------------|----------|
-| `LLM_API_KEY` | free provider key (step 5) | Yes for real agent work |
-| `LLM_BASE_URL` | optional provider base URL | Optional |
-| `LLM_MODEL` | optional model name | Optional |
+| `OPENROUTER_API_KEY` | OpenRouter free key (step 5) | Recommended for ₹0 operation |
+| `OPENROUTER_MODEL` | optional; defaults to `openrouter/free` | Optional |
+| `DEEPSEEK_API_KEY` | optional DeepSeek key | Optional; usage-priced |
+| `DEEPSEEK_MODEL` | optional; defaults to `deepseek-flash` | Optional |
+| `LLM_API_KEY` | existing Gemini key | Optional fallback |
+| `LLM_PROVIDER` | optional forced provider | Optional |
 | `WORKER_CALLBACK_SECRET` | **same value** as in Vercel (step 3) | Yes |
 | `AGENT_GITHUB_TOKEN` | same PAT as step 4 (for cross-repo checkout/push) | Recommended |
 
