@@ -28,6 +28,13 @@ export default function Home() {
   const { data: session, status } = useSession();
   const [tasks, setTasks] = useState<Task[]>([]);
   const [deleting, setDeleting] = useState<string | null>(null);
+  // Form state for quick task creation
+  const [repo, setRepo] = useState('');
+  const [branch, setBranch] = useState('main');
+  const [prompt, setPrompt] = useState('');
+  const [advanced, setAdvanced] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [submitMessage, setSubmitMessage] = useState('');
 
   async function deleteTask(id: string) {
     if (!window.confirm('Delete this task from the dashboard? This only removes the task record.')) return;
@@ -45,8 +52,33 @@ export default function Home() {
 
   const authenticated = status === 'authenticated';
 
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSubmitting(true);
+    setSubmitMessage('');
+    try {
+      const res = await fetch('/api/tasks', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ repository: repo, branch, prompt }),
+      });
+      const data = await res.json();
+      if (res.status === 401) {
+        setSubmitting(false);
+        setSubmitMessage('Please sign in with GitHub first.');
+        return;
+      }
+      if (!res.ok) throw new Error(data.error || 'Failed');
+      // Navigate to the task page
+      window.location.href = `/tasks/${data.id}`;
+    } catch (err: any) {
+      setSubmitting(false);
+      setSubmitMessage(err.message || 'Error');
+    }
+  };
+
   return (
-    <main style={{ minHeight: '100vh', background: 'linear-gradient(180deg,#f8fafc 0%,#f4f6f8 100%)', color: '#101828', fontFamily: 'Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif', padding: '24px 16px 56px' }}>
+    <main style={{ minHeight: '100vh', background: 'linear-gradient(180deg,#f8fafc 0%,#f4f6f8 100%)', color: '#101828', fontFamily: 'Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacFont,"Segoe UI",sans-serif', padding: '24px 16px 56px' }}>
       <div style={{ maxWidth: 820, margin: '0 auto' }}>
         <header style={{ display:'flex', justifyContent:'space-between', alignItems:'center', gap:16, padding:'8px 2px 28px' }}>
           <div>
@@ -65,22 +97,64 @@ export default function Home() {
           )}
         </header>
 
-        <section style={{ background:'#fff',border:'1px solid #e4e7ec',borderRadius:20,padding:'22px',boxShadow:'0 10px 32px rgba(16,24,40,.06)',marginBottom:14 }}>
-          <div style={{ display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:16 }}>
-            <div>
-              <div style={{ fontSize:18,fontWeight:750,letterSpacing:'-.02em' }}>Create a new coding task</div>
-              <div style={{ color:'#667085',fontSize:13.5,lineHeight:1.5,marginTop:6,maxWidth:570 }}>Describe what you want the Gold Worker to build, fix, test, or improve.</div>
+        {/* Quick task creation form */}
+        {authenticated && (
+          <section style={{ background:'#fff',border:'1px solid #e4e7ec',borderRadius:20,padding:'22px',boxShadow:'0 10px 32px rgba(16,24,40,.06)',marginBottom:14 }}>
+            <div style={{ display:'flex',flexDirection:'column',gap:12 }}>
+              <div style={{ fontSize:18,fontWeight:750,letterSpacing:'-.02em' }}>What would you like me to build?</div>
+              <textarea
+                value={prompt}
+                onChange={(e) => setPrompt(e.target.value)}
+                placeholder="Describe what you want the Gold Worker to build, fix, test, or improve..."
+                style={{ width:'100%',minHeight:80,padding:10,border:'1px solid #e4e7ec',borderRadius:8,fontSize:14,resize:'vertical' }}
+              />
+              <div style={{ display:'flex',alignItems:'center',gap:10,flexWrap:'wrap' }}>
+                <button
+                  type="button"
+                  onClick={() => setAdvanced(!advanced)}
+                  style={{ padding:'6px 10px',background:'#f2f4f7',border:0,borderRadius:6,fontSize:12,color:'#667085',cursor:'pointer' }}
+                >
+                  {advanced ? 'Hide advanced options' : 'Show advanced options'}
+                </button>
+                {advanced && (
+                  <>
+                    <div style={{ display:'flex',gap:10,alignItems:'center' }}>
+                      <label style={{ fontSize:12,color:'#667085',marginRight:4 }}>Repo:</label>
+                      <input
+                        value={repo}
+                        onChange={(e) => setRepo(e.target.value)}
+                        placeholder="owner/name"
+                        style={{ padding:8,border:'1px solid #e4e7ec',borderRadius:6,fontSize:12,width:120 }}
+                      />
+                    </div>
+                    <div style={{ display:'flex',gap:10,alignItems:'center' }}>
+                      <label style={{ fontSize:12,color:'#667085',marginRight:4 }}>Branch:</label>
+                      <input
+                        value={branch}
+                        onChange={(e) => setBranch(e.target.value)}
+                        placeholder="main"
+                        style={{ padding:8,border:'1px solid #e4e7ec',borderRadius:6,fontSize:12,width:80 }}
+                      />
+                    </div>
+                  </>
+                )}
+              </div>
+              <div style={{ marginTop:12,display:'flex',gap:10,alignItems:'center' }}>
+                <button
+                  type="submit"
+                  onClick={handleSubmit}
+                  disabled={submitting || !prompt.trim()}
+                  style={{ flex:1,padding:'12px 20px',background:submitting ? '#667085' : '#101828',color:'#fff',border:0,borderRadius:8,fontWeight:700,cursor:submitting || !prompt.trim() ? 'not-allowed' : 'pointer' }}
+                >
+                  {submitting ? 'Starting…' : 'START'}
+                </button>
+                {submitMessage && (
+                  <span style={{ color:submitMessage.startsWith('Please') ? '#667085' : 'crimson',fontSize:12.5,marginLeft:8 }}>{submitMessage}</span>
+                )}
+              </div>
             </div>
-            <div style={{ display:'none' }} />
-          </div>
-          <div style={{ marginTop:18 }}>
-            {authenticated ? (
-              <a href="/tasks/new" style={{ display:'inline-flex',alignItems:'center',justifyContent:'center',gap:7,padding:'11px 17px',background:'#101828',color:'#fff',borderRadius:10,textDecoration:'none',fontWeight:700,fontSize:13.5 }}>＋ New coding task</a>
-            ) : (
-              <button onClick={() => signIn('github')} style={{ padding:'11px 17px',background:'#101828',color:'#fff',border:0,borderRadius:10,fontWeight:700,cursor:'pointer' }}>Sign in to start</button>
-            )}
-          </div>
-        </section>
+          </section>
+        )}
 
         <section style={{ background:'#effaf3',border:'1px solid #ccebd7',borderRadius:16,padding:'14px 16px',marginBottom:28,display:'flex',alignItems:'center',gap:12 }}>
           <span style={{ width:10,height:10,borderRadius:'50%',background:'#12b76a',boxShadow:'0 0 0 4px #d9fbe8',flexShrink:0 }} />
