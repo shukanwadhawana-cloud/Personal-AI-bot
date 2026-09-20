@@ -112,7 +112,7 @@ Create an OpenRouter API key at https://openrouter.ai and add this **GitHub Acti
 
 ### Groq fallback (zero-cost tier)
 
-Groq exposes an OpenAI-compatible API at `https://api.groq.com/openai/v1`. The worker can use an explicitly configured Groq key as a second zero-cost provider. Available models and limits change over time; the worker defaults to `gpt-oss-20b` and does not assume unlimited usage. citeturn0search0turn1search0
+Groq exposes an OpenAI-compatible API at `https://api.groq.com/openai/v1`. The worker can use an explicitly configured Groq key as a second zero-cost provider. Available models and limits change over time; the worker defaults to `gpt-oss-20b` and does not assume unlimited usage.
 
 Add this **GitHub Actions secret** if you want Groq enabled:
 
