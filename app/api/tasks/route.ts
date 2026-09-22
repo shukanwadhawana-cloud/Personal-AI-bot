@@ -77,7 +77,7 @@ export async function POST(req: NextRequest) {
     const callbackUrl = `${req.nextUrl.origin}/api/tasks/${task.id}`;
     const callbackToken = await getTaskWorkerLease(task.id);
 
-    if (!token) {
+    if (configuredTokens.length === 0) {
       await updateTask(
         task.id,
         {
