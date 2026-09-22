@@ -58,15 +58,21 @@ export async function POST(req: NextRequest) {
     const workflowRef = WORKFLOW_FILE;
     const dispatchUrl = `https://api.github.com/repos/${controlPlaneRepo}/actions/workflows/${encodeURIComponent(workflowRef)}/dispatches`;
 
+    // Prefer the currently authenticated GitHub OAuth token. A stale server-side
+    // PAT must not shadow a fresh token obtained from the user's current login.
+    // GitHub returns 401 for invalid/revoked credentials; in that case we can
+    // safely fall back to an explicitly configured server token.
     const sessionToken = await getToken({
       req,
       secret: process.env.NEXTAUTH_SECRET,
       secureCookie: process.env.NODE_ENV === 'production',
     });
-    const token =
-      process.env.GITHUB_TOKEN ||
-      process.env.AGENT_GITHUB_TOKEN ||
-      (sessionToken as any)?.githubAccessToken;
+    const oauthToken = (sessionToken as any)?.githubAccessToken as string | undefined;
+    const configuredTokens = [
+      { source: 'oauth', token: oauthToken },
+      { source: 'agent_pat', token: process.env.AGENT_GITHUB_TOKEN },
+      { source: 'github_token', token: process.env.GITHUB_TOKEN },
+    ].filter((candidate): candidate is { source: string; token: string } => Boolean(candidate.token));
 
     const callbackUrl = `${req.nextUrl.origin}/api/tasks/${task.id}`;
     const callbackToken = await getTaskWorkerLease(task.id);
@@ -83,32 +89,68 @@ export async function POST(req: NextRequest) {
       );
     } else {
       try {
-        const res = await fetch(dispatchUrl, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${token}`,
-            Accept: 'application/vnd.github+json',
-            'X-GitHub-Api-Version': '2022-11-28',
-            'Content-Type': 'application/json',
+        const payload = {
+          ref: 'main',
+          inputs: {
+            task_id: task.id,
+            target_repo: repository,
+            target_branch: branch,
+            prompt,
+            callback_url: callbackUrl,
+            callback_token: callbackToken || '',
           },
-          body: JSON.stringify({
-            ref: 'main',
-            inputs: {
-              task_id: task.id,
-              target_repo: repository,
-              target_branch: branch,
-              prompt,
-              callback_url: callbackUrl,
-              callback_token: callbackToken || '',
-            },
-          }),
-        });
+        };
 
-        if (res.ok || res.status === 204) {
+        let lastStatus = 0;
+        let lastResponse = '';
+        let successfulSource = '';
+
+        for (const candidate of configuredTokens) {
+          const res = await fetch(dispatchUrl, {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${candidate.token}`,
+              Accept: 'application/vnd.github+json',
+              'X-GitHub-Api-Version': '2022-11-28',
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(payload),
+          });
+
+          lastStatus = res.status;
+          lastResponse = await res.text().catch(() => '');
+
+          if (res.ok || res.status === 204) {
+            successfulSource = candidate.source;
+            console.info('GitHub Actions dispatch accepted', {
+              repository: controlPlaneRepo,
+              workflow: workflowRef,
+              ref: 'main',
+              authSource: candidate.source,
+            });
+            break;
+          }
+
+          // A 401 means these credentials themselves are invalid/revoked.
+          // Try the next configured credential without exposing token material.
+          if (res.status !== 401) break;
+        }
+
+        if (successfulSource) {
           await updateTask(task.id, { status: 'QUEUED' }, auth.userId);
         } else {
-          const responseText = await res.text().catch(() => '');
-          console.error('Dispatch failed', res.status, responseText);
+          const responseText = lastResponse.slice(0, 800);
+          const credentialHint = lastStatus === 401
+            ? 'GitHub rejected every configured credential (401 Bad credentials). Re-authorize the GitHub OAuth app or replace the server PAT in Vercel.'
+            : lastStatus === 403
+              ? 'GitHub authenticated the request but denied workflow dispatch. Ensure the credential has Actions: write access (or repo scope for a classic OAuth/PAT).'
+              : '';
+          console.error('Dispatch failed', lastStatus, {
+            repository: controlPlaneRepo,
+            workflow: workflowRef,
+            authSourcesTried: configuredTokens.map((candidate) => candidate.source),
+            response: responseText,
+          });
           await updateTask(
             task.id,
             {
@@ -118,9 +160,10 @@ export async function POST(req: NextRequest) {
                 `repository=${controlPlaneRepo}`,
                 `workflow=${workflowRef}`,
                 'ref=main',
-                `status=${res.status}`,
-                `response=${responseText.slice(0, 800)}`,
-              ].join(' | '),
+                `status=${lastStatus}`,
+                credentialHint,
+                `response=${responseText}`,
+              ].filter(Boolean).join(' | '),
             },
             auth.userId
           );
