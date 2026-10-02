@@ -1,24 +1,44 @@
 import type { NextAuthOptions } from 'next-auth';
 import GitHubProvider from 'next-auth/providers/github';
 
+/**
+ * Scopes required for Actions workflow_dispatch on private/public repos:
+ * - read:user / user:email: identity
+ * - repo: repository access for dispatch target resolution
+ * - workflow: update GitHub Actions workflow files + dispatch
+ */
+const GITHUB_OAUTH_SCOPES = 'read:user user:email repo workflow';
+
 export const authOptions: NextAuthOptions = {
   providers: [
     GitHubProvider({
       clientId: process.env.GITHUB_ID || '',
       clientSecret: process.env.GITHUB_SECRET || '',
-      // Request identity plus repository access needed for Actions dispatch and future repo operations.
-      authorization: { params: { scope: 'read:user user:email repo workflow' } },
+      authorization: {
+        params: {
+          scope: GITHUB_OAUTH_SCOPES,
+        },
+      },
     }),
   ],
+  session: {
+    strategy: 'jwt',
+    maxAge: 30 * 24 * 60 * 60,
+  },
   callbacks: {
     async jwt({ token, account, profile }) {
-      if (account && profile) {
-        // Persist the GitHub numeric id for stable ownership
-        token.githubId = (profile as any).id?.toString();
-        token.login = (profile as any).login;
-        // Keep the provider token inside NextAuth's encrypted JWT so server routes
-        // can call GitHub on the signed-in user's behalf without exposing it to the browser.
-        (token as any).githubAccessToken = account.access_token;
+      if (account) {
+        if (account.access_token) {
+          (token as any).githubAccessToken = account.access_token;
+        }
+        if (account.providerAccountId) {
+          token.githubId = String(account.providerAccountId);
+        }
+      }
+      if (profile) {
+        const p = profile as { id?: number | string; login?: string };
+        if (p.id != null) token.githubId = String(p.id);
+        if (p.login) token.login = p.login;
       }
       return token;
     },
@@ -31,6 +51,8 @@ export const authOptions: NextAuthOptions = {
     },
   },
   secret: process.env.NEXTAUTH_SECRET,
-  // Secure cookies in production
   useSecureCookies: process.env.NODE_ENV === 'production',
+  pages: {
+    error: '/',
+  },
 };

@@ -10,6 +10,7 @@ type Task = {
   status: string;
   createdAt: string;
   prUrl?: string;
+  error?: string;
 };
 
 const statusLabel: Record<string, string> = {
@@ -24,10 +25,20 @@ const statusTone = (status: string) => {
   return { bg: '#f2f4f7', fg: '#475467', dot: '#667085' };
 };
 
+async function signInWithGitHub() {
+  await signIn('github', { callbackUrl: '/' }, { prompt: 'select_account' });
+}
+
+async function reconnectGitHub() {
+  await signOut({ redirect: false });
+  await signIn('github', { callbackUrl: '/' }, { prompt: 'consent' });
+}
+
 export default function Home() {
   const { data: session, status } = useSession();
   const [tasks, setTasks] = useState<Task[]>([]);
   const [deleting, setDeleting] = useState<string | null>(null);
+  const [reconnecting, setReconnecting] = useState(false);
 
   async function deleteTask(id: string) {
     if (!window.confirm('Delete this task from the dashboard? This only removes the task record.')) return;
@@ -38,12 +49,25 @@ export default function Home() {
     } finally { setDeleting(null); }
   }
 
+  async function onReconnect() {
+    setReconnecting(true);
+    try {
+      await reconnectGitHub();
+    } finally {
+      setReconnecting(false);
+    }
+  }
+
   useEffect(() => {
     if (status !== 'authenticated') return;
     fetch('/api/tasks').then((r) => (r.ok ? r.json() : [])).then(setTasks).catch(() => setTasks([]));
   }, [status]);
 
   const authenticated = status === 'authenticated';
+  const loginLabel = (session?.user as { login?: string } | undefined)?.login
+    || session?.user?.name
+    || session?.user?.email
+    || 'GitHub user';
 
   return (
     <main style={{ minHeight: '100vh', background: 'linear-gradient(180deg,#f8fafc 0%,#f4f6f8 100%)', color: '#101828', fontFamily: 'Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif', padding: '24px 16px 56px' }}>
@@ -54,14 +78,26 @@ export default function Home() {
               <div style={{ width:36,height:36,borderRadius:11,background:'#101828',color:'#fff',display:'grid',placeItems:'center',fontWeight:800,fontSize:14 }}>AI</div>
               <div>
                 <div style={{ fontSize:24,fontWeight:780,letterSpacing:'-.035em' }}>Personal AI Bot</div>
-                <div style={{ color:'#667085',fontSize:12.5,marginTop:3 }}>Gold Worker · AI coding tasks</div>
+                <div style={{ color:'#667085',fontSize:12.5,marginTop:3 }}>PAI Worker · AI coding tasks</div>
               </div>
             </div>
           </div>
           {authenticated ? (
-            <button onClick={() => signOut()} style={{ background:'#fff',border:'1px solid #d0d5dd',color:'#344054',borderRadius:10,padding:'9px 12px',fontSize:12.5,fontWeight:650,cursor:'pointer' }}>Sign out</button>
+            <div style={{ display:'flex', alignItems:'center', gap:8, flexWrap:'wrap', justifyContent:'flex-end' }}>
+              <span style={{ fontSize:12, color:'#667085', maxWidth:160, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{loginLabel}</span>
+              <button
+                type="button"
+                onClick={onReconnect}
+                disabled={reconnecting}
+                title="Force a fresh GitHub OAuth authorization. Use this if task dispatch fails with 401 Bad credentials."
+                style={{ background:'#fff',border:'1px solid #d0d5dd',color:'#344054',borderRadius:10,padding:'9px 12px',fontSize:12.5,fontWeight:650,cursor: reconnecting ? 'wait' : 'pointer' }}
+              >
+                {reconnecting ? 'Reconnecting…' : 'Reconnect GitHub'}
+              </button>
+              <button onClick={() => signOut({ callbackUrl: '/' })} style={{ background:'#fff',border:'1px solid #d0d5dd',color:'#344054',borderRadius:10,padding:'9px 12px',fontSize:12.5,fontWeight:650,cursor:'pointer' }}>Sign out</button>
+            </div>
           ) : (
-            <button onClick={() => signIn('github')} style={{ background:'#101828',color:'#fff',border:0,borderRadius:10,padding:'10px 14px',fontWeight:700,cursor:'pointer' }}>Sign in with GitHub</button>
+            <button onClick={signInWithGitHub} style={{ background:'#101828',color:'#fff',border:0,borderRadius:10,padding:'10px 14px',fontWeight:700,cursor:'pointer' }}>Sign in with GitHub</button>
           )}
         </header>
 
@@ -69,23 +105,28 @@ export default function Home() {
           <div style={{ display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:16 }}>
             <div>
               <div style={{ fontSize:18,fontWeight:750,letterSpacing:'-.02em' }}>Create a new coding task</div>
-              <div style={{ color:'#667085',fontSize:13.5,lineHeight:1.5,marginTop:6,maxWidth:570 }}>Describe what you want the Gold Worker to build, fix, test, or improve.</div>
+              <div style={{ color:'#667085',fontSize:13.5,lineHeight:1.5,marginTop:6,maxWidth:570 }}>Describe what you want the PAI Worker to build, fix, test, or improve.</div>
             </div>
-            <div style={{ display:'none' }} />
           </div>
           <div style={{ marginTop:18 }}>
             {authenticated ? (
               <a href="/tasks/new" style={{ display:'inline-flex',alignItems:'center',justifyContent:'center',gap:7,padding:'11px 17px',background:'#101828',color:'#fff',borderRadius:10,textDecoration:'none',fontWeight:700,fontSize:13.5 }}>＋ New coding task</a>
             ) : (
-              <button onClick={() => signIn('github')} style={{ padding:'11px 17px',background:'#101828',color:'#fff',border:0,borderRadius:10,fontWeight:700,cursor:'pointer' }}>Sign in to start</button>
+              <button onClick={signInWithGitHub} style={{ padding:'11px 17px',background:'#101828',color:'#fff',border:0,borderRadius:10,fontWeight:700,cursor:'pointer' }}>Sign in to start</button>
             )}
           </div>
+          {authenticated && (
+            <p style={{ marginTop:14, fontSize:12.5, color:'#667085', lineHeight:1.45 }}>
+              If creating a task fails with <strong>401 Bad credentials</strong>, click <strong>Reconnect GitHub</strong> above.
+              Being signed in does not guarantee the stored GitHub token can still dispatch Actions.
+            </p>
+          )}
         </section>
 
         <section style={{ background:'#effaf3',border:'1px solid #ccebd7',borderRadius:16,padding:'14px 16px',marginBottom:28,display:'flex',alignItems:'center',gap:12 }}>
           <span style={{ width:10,height:10,borderRadius:'50%',background:'#12b76a',boxShadow:'0 0 0 4px #d9fbe8',flexShrink:0 }} />
           <div style={{ minWidth:0 }}>
-            <div style={{ color:'#067647',fontSize:13.5,fontWeight:750 }}>Gold Worker operational</div>
+            <div style={{ color:'#067647',fontSize:13.5,fontWeight:750 }}>PAI Worker operational</div>
             <div style={{ color:'#47715a',fontSize:12.5,marginTop:3,lineHeight:1.4 }}>Dispatch · Gemini/Aider · verification · callbacks · PR creation</div>
           </div>
         </section>
@@ -113,6 +154,9 @@ export default function Home() {
                       <div style={{ fontWeight:730,fontSize:14.5,marginBottom:6,overflowWrap:'anywhere' }}>{t.title || `Task ${t.id.slice(0,8)}`}</div>
                       <div style={{ color:'#667085',fontSize:12.5,lineHeight:1.45 }}>{t.repository}</div>
                       <div style={{ color:'#98a2b3',fontSize:11.5,marginTop:3 }}>{new Date(t.createdAt).toLocaleString()}</div>
+                      {t.status === 'FAILED' && t.error && (
+                        <div style={{ color:'#b42318', fontSize:11.5, marginTop:6, lineHeight:1.4, overflowWrap:'anywhere' }}>{t.error.slice(0, 240)}{t.error.length > 240 ? '…' : ''}</div>
+                      )}
                     </a>
                     <span style={{ flexShrink:0,display:'inline-flex',alignItems:'center',gap:6,padding:'6px 9px',borderRadius:999,background:tone.bg,color:tone.fg,fontSize:11.5,fontWeight:750 }}>
                       <span style={{ width:6,height:6,borderRadius:'50%',background:tone.dot }} />{label}
@@ -120,7 +164,7 @@ export default function Home() {
                   </div>
                   {(t.prUrl || authenticated) && (
                     <div style={{ marginTop:13,paddingTop:11,borderTop:'1px solid #f0f2f5',display:'flex',justifyContent:'space-between',alignItems:'center',gap:10 }}>
-                      {t.prUrl ? <a href={t.prUrl} target="_blank" rel="noreferrer" style={{ color:'#175cd3',fontSize:12.5,fontWeight:700,textDecoration:'none' }}>View pull request ↗</a> : <span style={{ color:'#98a2b3',fontSize:12 }}>Worker is processing…</span>}
+                      {t.prUrl ? <a href={t.prUrl} target="_blank" rel="noreferrer" style={{ color:'#175cd3',fontSize:12.5,fontWeight:700,textDecoration:'none' }}>View pull request ↗</a> : <span style={{ color:'#98a2b3',fontSize:12 }}>{t.status === 'FAILED' ? 'Dispatch or worker failed' : 'Worker is processing…'}</span>}
                       <button type="button" onClick={() => deleteTask(t.id)} disabled={deleting === t.id} style={{ border:0,background:'transparent',color:'#b42318',borderRadius:7,padding:'5px 7px',fontSize:11.5,fontWeight:650,cursor:deleting === t.id ? 'wait' : 'pointer' }}>{deleting === t.id ? 'Deleting…' : 'Delete'}</button>
                     </div>
                   )}
