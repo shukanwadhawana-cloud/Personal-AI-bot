@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # PAI agent execution: must run on agent/<task-id> only.
-# Does not invent implementation files — Aider must produce real edits.
+# Selective context for large repos; does not invent implementation files.
 set -euo pipefail
 BRANCH="${AGENT_BRANCH:?}"
 test "$(git branch --show-current)" = "$BRANCH" || { echo "STAGE=AGENT_EXECUTION failed expected=$BRANCH actual=$(git branch --show-current)"; exit 1; }
@@ -20,58 +20,78 @@ elif [ "$PROVIDER" = "gemini" ] || [ "$PROVIDER" = "auto" ]; then
 else echo "STAGE=AGENT_EXECUTION failed provider"; exit 1; fi
 echo "provider=$ACTIVE_PROVIDER model=$MODEL branch=$(git branch --show-current) HEAD=$(git rev-parse HEAD) baseline=$BASELINE_SHA"
 
-# Path hints for Aider --file. Skip guidance-only mentions (Follow CONTRIBUTING.md).
-FILE_HINTS=$(python3 -c '
-import re, os
-p = os.environ.get("TASK_PROMPT", "")
-ref = re.compile(
-    r"\b(follow|following|read|reading|see|consult|refer(?:ring)?\s+to|"
-    r"according\s+to|per|based\s+on|as\s+(?:described|documented|stated)\s+in|"
-    r"instructions?\s+in|guidance\s+in)\b",
-    re.I,
-)
-impl = re.compile(
-    r"\b(add|create|implement|build|fix|update|refactor|remove|delete|replace|"
-    r"modify|change|make|write)\b",
-    re.I,
-)
-paths = list(re.finditer(r"[\w./-]+\.[a-zA-Z0-9]{1,12}", p))
-seen=set(); out=[]
-for m in paths:
-  x = m.group(0)
-  if x in seen: continue
-  if x.startswith("http") or "github.com" in x: continue
-  if not ("/" in x or x.endswith((".md",".txt",".ts",".tsx",".js",".jsx",".mjs",".cjs",".py",".json",".yml",".yaml",".css",".html"))):
-    continue
-  pre = p[max(0, m.start()-100):m.start()]
-  if ref.search(pre):
-    refs = list(ref.finditer(pre))
-    imps = list(impl.finditer(pre))
-    last_ref = refs[-1].start() if refs else -1
-    last_impl = imps[-1].start() if imps else -1
-    if last_ref > last_impl:
-      continue
-  seen.add(x); out.append(x)
-print(" ".join(out[:12]))
-')
-EXTRA_ARGS=()
-for f in $FILE_HINTS; do
-  if [ -e "$f" ]; then EXTRA_ARGS+=(--file "$f"); fi
-done
-echo "file_hints=$FILE_HINTS"
+CONTEXT_SCRIPT="/tmp/pai-context-select.py"
+if [ ! -s "$CONTEXT_SCRIPT" ]; then
+  if [ -f ".github/scripts/pai-context-select.py" ]; then
+    cp ".github/scripts/pai-context-select.py" "$CONTEXT_SCRIPT"
+  elif [ -n "${GH_TOKEN:-}" ] && [ -n "${GITHUB_REPOSITORY:-}" ]; then
+    REF="${GITHUB_SHA:-main}"
+    gh api "repos/${GITHUB_REPOSITORY}/contents/.github/scripts/pai-context-select.py?ref=${REF}" --jq .content \
+      | base64 --decode > "$CONTEXT_SCRIPT" || true
+  fi
+fi
+test -s "$CONTEXT_SCRIPT" || { echo "STAGE=AGENT_EXECUTION failed: missing pai-context-select.py"; exit 1; }
 
-AGENT_INSTRUCTION=$(printf '%s\n\n---\nWorker constraints (mandatory):\n1. You are on branch %s. Do not checkout main/master/default.\n2. IMPLEMENT the requested changes with actual file edits. Do not only inspect, plan, or describe.\n3. If the task names specific files or paths to create/modify, those paths must be modified (or created when the task asks to create them).\n4. Prefer reading CONTRIBUTING.md / README / existing tests when present, then implement — do not edit guidance files unless the task explicitly asks to change them.\n5. Do not change unrelated config such as .gitignore unless the task explicitly requires it.\n6. Do not stop after exploration tool calls — finish by writing the code/docs the task requests.\n7. Do not invent task IDs, commit SHAs, or test results. The worker will write authoritative runtime proof metadata after acceptance.\n' "$TASK_PROMPT" "$BRANCH")
+select_context() {
+  local aggressive_flag="${1:-0}"
+  if [ "$aggressive_flag" = "1" ]; then
+    PAI_CONTEXT_AGGRESSIVE=1 python3 "$CONTEXT_SCRIPT" . "$TASK_PROMPT"
+  else
+    PAI_CONTEXT_AGGRESSIVE=0 python3 "$CONTEXT_SCRIPT" . "$TASK_PROMPT"
+  fi
+}
+
+build_aider_args_from_selection() {
+  EXTRA_ARGS=()
+  MAP_TOKENS=1024
+  FILE_HINTS=""
+  local line
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      MAP_TOKENS=*) MAP_TOKENS="${line#MAP_TOKENS=}" ;;
+      FILE=*)
+        f="${line#FILE=}"
+        if [ -e "$f" ]; then
+          EXTRA_ARGS+=(--file "$f")
+          FILE_HINTS="${FILE_HINTS} ${f}"
+        fi
+        ;;
+      READ=*)
+        f="${line#READ=}"
+        if [ -e "$f" ]; then
+          EXTRA_ARGS+=(--read "$f")
+        fi
+        ;;
+      META=*) echo "context_$line" ;;
+    esac
+  done
+  FILE_HINTS="${FILE_HINTS# }"
+  EXTRA_ARGS+=(--map-tokens "$MAP_TOKENS")
+  EXTRA_ARGS+=(--no-show-model-warnings)
+  echo "map_tokens=$MAP_TOKENS file_hints=$FILE_HINTS extra_argc=${#EXTRA_ARGS[@]}"
+}
+
+SELECTION=$(select_context 0)
+printf '%s\n' "$SELECTION"
+build_aider_args_from_selection <<< "$SELECTION"
+
+AGENT_INSTRUCTION=$(printf '%s\n\n---\nWorker constraints (mandatory):\n1. You are on branch %s. Do not checkout main/master/default.\n2. IMPLEMENT the requested changes with actual file edits. Do not only inspect, plan, or describe.\n3. If the task names specific files or paths to create/modify, those paths must be modified (or created when the task asks to create them).\n4. Prefer reading CONTRIBUTING.md / README / AGENTS.md / existing tests when present, then implement — do not edit guidance files unless the task explicitly asks to change them.\n5. Do not change unrelated config such as .gitignore unless the task explicitly requires it.\n6. Do not stop after exploration tool calls — finish by writing the code/docs the task requests.\n7. Do not invent task IDs, commit SHAs, or test results. The worker will write authoritative runtime proof metadata after acceptance.\n8. Only open/edit files needed for this task; do not load the entire repository into context.\n' "$TASK_PROMPT" "$BRANCH")
+
+is_token_limit_error() {
+  printf '%s' "$1" | grep -qiE 'token limit|context length|context window|maximum context|max_tokens|too many tokens|prompt is too long|maximum input'
+}
 
 run_aider() {
   set +e
-  if [ ${#EXTRA_ARGS[@]} -gt 0 ]; then
-    AIDER_OUTPUT=$(printf '%s' "$1" | aider --yes --no-auto-commits --model "$MODEL" "${EXTRA_ARGS[@]}" --message-file /dev/stdin 2>&1)
-  else
-    AIDER_OUTPUT=$(printf '%s' "$1" | aider --yes --no-auto-commits --model "$MODEL" --message-file /dev/stdin 2>&1)
-  fi
-  AIDER_RC=$?; set -e
+  AIDER_OUTPUT=$(printf '%s' "$1" | aider --yes --no-auto-commits --model "$MODEL" "${EXTRA_ARGS[@]}" --message-file /dev/stdin 2>&1)
+  AIDER_RC=$?
+  set -e
   printf '%s\n' "$AIDER_OUTPUT"
   test "$(git branch --show-current)" = "$BRANCH" || { echo "branch drift"; return 1; }
+  if is_token_limit_error "$AIDER_OUTPUT"; then
+    echo "token_limit_detected=1"
+    return 99
+  fi
   return "$AIDER_RC"
 }
 
@@ -92,7 +112,22 @@ hint_paths_touched() {
 }
 
 echo "STAGE=AGENT_EXECUTION"
-run_aider "$AGENT_INSTRUCTION" || true
+set +e
+run_aider "$AGENT_INSTRUCTION"
+RC=$?
+set -e
+
+if [ "$RC" = "99" ]; then
+  echo "Retry with reduced context after token limit"
+  SELECTION=$(select_context 1)
+  printf '%s\n' "$SELECTION"
+  build_aider_args_from_selection <<< "$SELECTION"
+  set +e
+  run_aider "$(printf '%s\n\nIMPORTANT: Context was reduced due to token limits. Edit only the files provided. Implement the task now.' "$AGENT_INSTRUCTION")"
+  RC=$?
+  set -e
+fi
+
 if ! has_diff; then
   echo "Retry after empty edit"
   run_aider "$(printf '%s\n\nIMPORTANT: Apply the file change now. Write the actual file contents. Do not only plan.' "$AGENT_INSTRUCTION")" || true
@@ -128,7 +163,7 @@ for a in 1 2 3; do
       "${MISSING:-unknown}" "$TASK_PROMPT" "$ACCEPTANCE_OUTPUT" "$BRANCH")
     set +e
     if [ ${#RETRY_FILES[@]} -gt 0 ]; then
-      printf '%s' "$RETRY_MSG" | aider --yes --no-auto-commits --model "$MODEL" "${RETRY_FILES[@]}" --message-file /dev/stdin 2>&1 || true
+      printf '%s' "$RETRY_MSG" | aider --yes --no-auto-commits --model "$MODEL" --map-tokens 0 --no-show-model-warnings "${RETRY_FILES[@]}" --message-file /dev/stdin 2>&1 || true
     else
       run_aider "$RETRY_MSG" || true
     fi
@@ -171,7 +206,6 @@ test "$verified" -eq 1 || { echo "STAGE=VERIFICATION failed"; exit 1; }
 rm -rf node_modules .next dist build .aider* 2>/dev/null || true
 if git show "$BASELINE_SHA:package-lock.json" >/dev/null 2>&1; then :; else rm -f package-lock.json 2>/dev/null || true; fi
 
-# Drop unsolicited .gitignore edits (task must explicitly request .gitignore).
 if ! printf '%s' "$TASK_PROMPT" | grep -qiE '\.gitignore'; then
   if git diff --name-only "$BASELINE_SHA" | grep -qx '.gitignore' \
     || git ls-files --others --exclude-standard | grep -qx '.gitignore'; then
@@ -180,8 +214,6 @@ if ! printf '%s' "$TASK_PROMPT" | grep -qiE '\.gitignore'; then
   fi
 fi
 
-# Authoritative E2E proof: only after acceptance+verification, with real runtime values.
-# Never leave agent-invented placeholders (<baseline-sha>, fake task ids) as final proof.
 PROOF_PATH="docs/personal-ai-bot-e2e-proof.md"
 need_proof=0
 if printf '%s' "$TASK_PROMPT" | grep -q 'personal-ai-bot-e2e-proof'; then need_proof=1; fi
@@ -217,7 +249,6 @@ else
 fi
 COMMIT_SHA=$(git rev-parse HEAD)
 
-# Stamp real implementation commit SHA into worker-authored proof (one extra commit).
 if [ "$need_proof" -eq 1 ] && [ -f "$PROOF_PATH" ]; then
   sed -i "s/^final_commit_sha=.*/final_commit_sha=${COMMIT_SHA}/" "$PROOF_PATH"
   git add "$PROOF_PATH"
