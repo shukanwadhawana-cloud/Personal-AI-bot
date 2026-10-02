@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# PAI agent execution: must run on agent/<task-id> only.
+# Does not invent implementation files — Aider must produce real edits.
 set -euo pipefail
 BRANCH="${AGENT_BRANCH:?}"
 test "$(git branch --show-current)" = "$BRANCH" || { echo "STAGE=AGENT_EXECUTION failed expected=$BRANCH actual=$(git branch --show-current)"; exit 1; }
@@ -18,8 +20,7 @@ elif [ "$PROVIDER" = "gemini" ] || [ "$PROVIDER" = "auto" ]; then
 else echo "STAGE=AGENT_EXECUTION failed provider"; exit 1; fi
 echo "provider=$ACTIVE_PROVIDER model=$MODEL branch=$(git branch --show-current) HEAD=$(git rev-parse HEAD) baseline=$BASELINE_SHA"
 
-AGENT_INSTRUCTION=$(printf '%s\n\n---\nStay on branch %s. Do not checkout main/master/default. You must apply file edits in the repository.' "$TASK_PROMPT" "$BRANCH")
-
+# Extract path-like tokens from the task for --file hints (Aider chat context).
 FILE_HINTS=$(python3 -c '
 import re, os
 p = os.environ.get("TASK_PROMPT", "")
@@ -28,13 +29,19 @@ seen=set(); out=[]
 for x in paths:
   if x in seen: continue
   if x.startswith("http") or "github.com" in x: continue
-  if "/" in x or x.endswith((".md",".txt",".ts",".tsx",".js",".py",".json",".yml",".yaml")):
+  if "/" in x or x.endswith((".md",".txt",".ts",".tsx",".js",".jsx",".mjs",".cjs",".py",".json",".yml",".yaml",".css",".html")):
     seen.add(x); out.append(x)
-print(" ".join(out[:8]))
+print(" ".join(out[:12]))
 ')
 EXTRA_ARGS=()
-for f in $FILE_HINTS; do EXTRA_ARGS+=(--file "$f"); done
+for f in $FILE_HINTS; do
+  # Only pass --file for paths that already exist; Aider still creates new files via edits.
+  if [ -e "$f" ]; then EXTRA_ARGS+=(--file "$f"); fi
+done
 echo "file_hints=$FILE_HINTS"
+
+# Strong instruction: implement, do not merely plan. Does not invent content for the worker.
+AGENT_INSTRUCTION=$(printf '%s\n\n---\nWorker constraints (mandatory):\n1. You are on branch %s. Do not checkout main/master/default.\n2. IMPLEMENT the requested changes with actual file edits. Do not only inspect, plan, or describe.\n3. If the task names specific files or paths, those paths must be modified (or created when the task asks to create them).\n4. Prefer reading CONTRIBUTING.md / README / existing tests when present, then implement.\n5. Do not change unrelated config such as .gitignore unless the task explicitly requires it.\n6. Do not stop after exploration tool calls — finish by writing the code/docs the task requests.\n' "$TASK_PROMPT" "$BRANCH")
 
 run_aider() {
   set +e
@@ -48,15 +55,34 @@ run_aider() {
   test "$(git branch --show-current)" = "$BRANCH" || { echo "branch drift"; return 1; }
   return "$AIDER_RC"
 }
+
 has_diff() {
   ! git diff --quiet 2>/dev/null || ! git diff --cached --quiet 2>/dev/null || [ -n "$(git ls-files --others --exclude-standard)" ]
+}
+
+# True when every existing path in FILE_HINTS appears in the current change set.
+# Missing brand-new paths are left to the acceptance gate (authoritative).
+hint_paths_touched() {
+  [ -z "${FILE_HINTS// }" ] && return 0
+  local changed
+  changed=$(git diff --name-only "$BASELINE_SHA" 2>/dev/null; git ls-files --others --exclude-standard)
+  local f
+  for f in $FILE_HINTS; do
+    [ -e "$f" ] || continue
+    echo "$changed" | grep -Fxq "$f" || return 1
+  done
+  return 0
 }
 
 echo "STAGE=AGENT_EXECUTION"
 run_aider "$AGENT_INSTRUCTION" || true
 if ! has_diff; then
   echo "Retry after empty edit"
-  run_aider "$(printf '%s\n\nIMPORTANT: Apply the file change now. Write the file contents.' "$AGENT_INSTRUCTION")" || true
+  run_aider "$(printf '%s\n\nIMPORTANT: Apply the file change now. Write the actual file contents. Do not only plan.' "$AGENT_INSTRUCTION")" || true
+fi
+if has_diff && ! hint_paths_touched; then
+  echo "Partial edit detected (hint paths still untouched); forcing implementation pass"
+  run_aider "$(printf '%s\n\nIMPORTANT: Previous edits did not cover the required implementation paths (%s). Edit those files now with the requested behavior. Do not only add docs or .gitignore.' "$AGENT_INSTRUCTION" "$FILE_HINTS")" || true
 fi
 if ! has_diff && [ "$ACTIVE_PROVIDER" != "gemini" ] && [ -n "${GEMINI_API_KEY:-}" ]; then
   unset OPENAI_API_BASE OPENAI_API_KEY; MODEL="gemini/gemini-3.6-flash"; ACTIVE_PROVIDER="gemini"
@@ -69,11 +95,29 @@ fi
 
 echo "STAGE=ACCEPTANCE_GATE"
 acceptance_passed=0
-for a in 1 2; do
+for a in 1 2 3; do
   set +e; ACCEPTANCE_OUTPUT=$(python /tmp/task-acceptance-gate.py "$TASK_PROMPT" "$BASELINE_SHA" 2>&1); rc=$?; set -e
   echo "$ACCEPTANCE_OUTPUT"
-  [ "$rc" -eq 0 ] && acceptance_passed=1 && break
-  [ "$a" -lt 2 ] && run_aider "Acceptance failed. $TASK_PROMPT Evidence: $ACCEPTANCE_OUTPUT Stay on $BRANCH. Apply the required file edits." || true
+  if [ "$rc" -eq 0 ]; then acceptance_passed=1; break; fi
+  if [ "$a" -lt 3 ]; then
+    MISSING=$(printf '%s\n' "$ACCEPTANCE_OUTPUT" | sed -n 's/^ACCEPTANCE_MISSING_PATHS=//p' | head -n1 | tr ',' ' ')
+    RETRY_FILES=()
+    for f in $MISSING; do
+      f="${f#"${f%%[![:space:]]*}"}"; f="${f%"${f##*[![:space:]]}"}"
+      [ -n "$f" ] || continue
+      [ -e "$f" ] && RETRY_FILES+=(--file "$f")
+    done
+    RETRY_MSG=$(printf 'Acceptance failed. You must IMPLEMENT the missing required paths with real file edits.\nMissing paths: %s\nOriginal task:\n%s\nEvidence:\n%s\nStay on branch %s. Do not only plan. Do not only edit unrelated docs or .gitignore.' \
+      "${MISSING:-unknown}" "$TASK_PROMPT" "$ACCEPTANCE_OUTPUT" "$BRANCH")
+    set +e
+    if [ ${#RETRY_FILES[@]} -gt 0 ]; then
+      printf '%s' "$RETRY_MSG" | aider --yes --no-auto-commits --model "$MODEL" "${RETRY_FILES[@]}" --message-file /dev/stdin 2>&1 || true
+    else
+      run_aider "$RETRY_MSG" || true
+    fi
+    set -e
+    test "$(git branch --show-current)" = "$BRANCH" || { echo "branch drift after acceptance retry"; exit 1; }
+  fi
 done
 test "$acceptance_passed" -eq 1 || { echo "STAGE=ACCEPTANCE_GATE failed"; exit 1; }
 
