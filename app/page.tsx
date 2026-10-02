@@ -24,6 +24,12 @@ const statusTone = (status: string) => {
   return { bg: '#f2f4f7', fg: '#475467', dot: '#667085' };
 };
 
+async function signInWithGitHub() {
+  // Force a fresh GitHub OAuth round-trip/account selection instead of
+  // silently reusing an existing browser session.
+  await signIn('github', { callbackUrl: '/' }, { prompt: 'select_account' });
+}
+
 export default function Home() {
   const { data: session, status } = useSession();
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -61,7 +67,7 @@ export default function Home() {
           {authenticated ? (
             <button onClick={() => signOut()} style={{ background:'#fff',border:'1px solid #d0d5dd',color:'#344054',borderRadius:10,padding:'9px 12px',fontSize:12.5,fontWeight:650,cursor:'pointer' }}>Sign out</button>
           ) : (
-            <button onClick={() => signIn('github')} style={{ background:'#101828',color:'#fff',border:0,borderRadius:10,padding:'10px 14px',fontWeight:700,cursor:'pointer' }}>Sign in with GitHub</button>
+            <button onClick={signInWithGitHub} style={{ background:'#101828',color:'#fff',border:0,borderRadius:10,padding:'10px 14px',fontWeight:700,cursor:'pointer' }}>Sign in with GitHub</button>
           )}
         </header>
 
@@ -77,7 +83,7 @@ export default function Home() {
             {authenticated ? (
               <a href="/tasks/new" style={{ display:'inline-flex',alignItems:'center',justifyContent:'center',gap:7,padding:'11px 17px',background:'#101828',color:'#fff',borderRadius:10,textDecoration:'none',fontWeight:700,fontSize:13.5 }}>＋ New coding task</a>
             ) : (
-              <button onClick={() => signIn('github')} style={{ padding:'11px 17px',background:'#101828',color:'#fff',border:0,borderRadius:10,fontWeight:700,cursor:'pointer' }}>Sign in to start</button>
+              <button onClick={signInWithGitHub} style={{ padding:'11px 17px',background:'#101828',color:'#fff',border:0,borderRadius:10,fontWeight:700,cursor:'pointer' }}>Sign in to start</button>
             )}
           </div>
         </section>
