@@ -1,1 +1,298 @@
-PLACEHOLDER
+name: PAI Worker
+
+on:
+  workflow_dispatch:
+    inputs:
+      task_id:
+        description: Task ID from control plane
+        required: true
+        type: string
+      target_repo:
+        description: owner/repo to work on
+        required: true
+        type: string
+      target_branch:
+        description: Base branch (empty = repository default)
+        required: false
+        default: ""
+        type: string
+      prompt:
+        description: Natural language coding instruction
+        required: true
+        type: string
+      callback_url:
+        description: Full URL to PATCH task status
+        required: true
+        type: string
+      callback_token:
+        description: Per-task callback credential
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  agent:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Validate inputs
+        env:
+          TARGET_REPO: ${{ inputs.target_repo }}
+          TASK_ID: ${{ inputs.task_id }}
+          TASK_PROMPT: ${{ inputs.prompt }}
+        run: |
+          set -euo pipefail
+          echo "STAGE=INPUT_VALIDATION"
+          case "$TARGET_REPO" in */*) ;; *) echo "invalid repository format"; exit 1 ;; esac
+          test -n "$TASK_ID" && test -n "$TASK_PROMPT"
+          case "$TASK_ID" in *..*|*/*|*\\*|*[[:space:]]*) echo "unsafe task_id"; exit 1 ;; esac
+          echo "RUNNER_OK"
+
+      - name: Validate agent GitHub token
+        env:
+          AGENT_GITHUB_TOKEN: ${{ secrets.AGENT_GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "STAGE=CREDENTIAL_VALIDATION"
+          test -n "${AGENT_GITHUB_TOKEN:-}" || { echo "AGENT_GITHUB_TOKEN missing"; exit 1; }
+          GH_TOKEN="$AGENT_GITHUB_TOKEN" gh api user --jq '"authenticated as: " + .login'
+
+      - name: Report RUNNING
+        env:
+          CALLBACK_TOKEN: ${{ inputs.callback_token }}
+          CALLBACK_URL: ${{ inputs.callback_url }}
+          VERCEL_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
+          WORKER_CALLBACK_SECRET: ${{ secrets.WORKER_CALLBACK_SECRET }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -uo pipefail
+          URL="$CALLBACK_URL"
+          if [ -n "${VERCEL_BYPASS_SECRET:-}" ]; then
+            case "$URL" in *\?*) URL="${URL}&x-vercel-protection-bypass=${VERCEL_BYPASS_SECRET}" ;;
+              *) URL="${URL}?x-vercel-protection-bypass=${VERCEL_BYPASS_SECRET}" ;; esac
+          fi
+          HDR=(-H "Content-Type: application/json" -H "x-worker-token: ${CALLBACK_TOKEN}")
+          [ -n "${WORKER_CALLBACK_SECRET:-}" ] && HDR+=(-H "x-worker-secret: ${WORKER_CALLBACK_SECRET}")
+          [ -n "${VERCEL_BYPASS_SECRET:-}" ] && HDR+=(-H "x-vercel-protection-bypass: ${VERCEL_BYPASS_SECRET}")
+          NOW=$(date -u -Iseconds)
+          HTTP=$(curl -sS -o /tmp/cb.txt -w "%{http_code}" -X PATCH "$URL" "${HDR[@]}" \
+            -d "{\"status\":\"RUNNING\",\"workerRunId\":\"${RUN_ID}\",\"heartbeatAt\":\"${NOW}\"}" || echo 000)
+          echo "callback_http=$HTTP"; head -c 400 /tmp/cb.txt || true; echo
+
+      - name: Resolve base branch and writable repository
+        id: prepare
+        env:
+          TARGET_REPO: ${{ inputs.target_repo }}
+          REQUESTED_BRANCH: ${{ inputs.target_branch }}
+          GH_TOKEN: ${{ secrets.AGENT_GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "STAGE=TARGET_REPOSITORY_RESOLUTION"
+          AGENT_OWNER=$(gh api user --jq .login)
+          UPSTREAM_OWNER=${TARGET_REPO%%/*}
+          REPO_NAME=${TARGET_REPO#*/}
+          test -n "$UPSTREAM_OWNER" && test -n "$REPO_NAME" && test "$TARGET_REPO" != "$REPO_NAME"
+          if [ -n "${REQUESTED_BRANCH:-}" ]; then
+            BASE_BRANCH="$REQUESTED_BRANCH"
+            gh api "repos/$TARGET_REPO/branches/$BASE_BRANCH" --jq .name >/dev/null
+          else
+            BASE_BRANCH=$(gh api "repos/$TARGET_REPO" --jq .default_branch)
+            test -n "$BASE_BRANCH"
+          fi
+          echo "base_branch=$BASE_BRANCH"
+          echo "STAGE=FORK_RESOLUTION"
+          if [ "$AGENT_OWNER" = "$UPSTREAM_OWNER" ]; then
+            WRITABLE_REPO="$TARGET_REPO"
+          else
+            WRITABLE_REPO="$AGENT_OWNER/$REPO_NAME"
+            if gh repo view "$WRITABLE_REPO" >/dev/null 2>&1; then
+              PARENT=$(gh api "repos/$WRITABLE_REPO" --jq '.parent.full_name // empty')
+              test "$PARENT" = "$TARGET_REPO" || { echo "fork parent mismatch parent=$PARENT"; exit 1; }
+            else
+              gh api --method POST "repos/$TARGET_REPO/forks" -f name="$REPO_NAME" >/tmp/fork.json
+              for i in 1 2 3 4 5 6 7 8 9 10; do
+                if gh repo view "$WRITABLE_REPO" >/dev/null 2>&1; then
+                  PARENT=$(gh api "repos/$WRITABLE_REPO" --jq '.parent.full_name // empty')
+                  [ "$PARENT" = "$TARGET_REPO" ] && break
+                fi
+                sleep 3
+              done
+              PARENT=$(gh api "repos/$WRITABLE_REPO" --jq '.parent.full_name // empty')
+              test "$PARENT" = "$TARGET_REPO" || { echo "fork not ready parent=$PARENT"; exit 1; }
+            fi
+          fi
+          echo "target_repo=$WRITABLE_REPO" >> "$GITHUB_OUTPUT"
+          echo "upstream_repo=$TARGET_REPO" >> "$GITHUB_OUTPUT"
+          echo "base_branch=$BASE_BRANCH" >> "$GITHUB_OUTPUT"
+          echo "agent_owner=$AGENT_OWNER" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout writable repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.prepare.outputs.target_repo }}
+          token: ${{ secrets.AGENT_GITHUB_TOKEN }}
+          path: workspace
+          ref: ${{ steps.prepare.outputs.base_branch }}
+          fetch-depth: 0
+
+      - name: Create isolated agent branch
+        id: branch
+        env:
+          TASK_ID: ${{ inputs.task_id }}
+          UPSTREAM_REPO: ${{ steps.prepare.outputs.upstream_repo }}
+          WRITABLE_REPO: ${{ steps.prepare.outputs.target_repo }}
+          BASE_BRANCH: ${{ steps.prepare.outputs.base_branch }}
+          GH_TOKEN: ${{ secrets.AGENT_GITHUB_TOKEN }}
+        working-directory: workspace
+        run: |
+          set -euo pipefail
+          echo "STAGE=BRANCH_CREATION"
+          BRANCH="agent/${TASK_ID}"
+          git config user.name "Personal-AI-Bot"
+          git config user.email "bot@users.noreply.github.com"
+          if [ "$WRITABLE_REPO" != "$UPSTREAM_REPO" ]; then
+            git remote remove upstream 2>/dev/null || true
+            git remote add upstream "https://x-access-token:${GH_TOKEN}@github.com/${UPSTREAM_REPO}.git"
+            git fetch upstream "$BASE_BRANCH"
+            git checkout -B "$BRANCH" "upstream/$BASE_BRANCH"
+          else
+            git fetch origin "$BASE_BRANCH"
+            git checkout -B "$BRANCH" "origin/$BASE_BRANCH"
+          fi
+          CURRENT=$(git branch --show-current)
+          HEAD_SHA=$(git rev-parse HEAD)
+          echo "expected=$BRANCH actual=$CURRENT HEAD=$HEAD_SHA"
+          if [ "$CURRENT" != "$BRANCH" ]; then
+            echo "STAGE=BRANCH_CREATION failed expected=$BRANCH actual=$CURRENT HEAD=$HEAD_SHA"
+            exit 1
+          fi
+          case "$CURRENT" in main|master|develop|trunk) echo "refused default branch"; exit 1 ;; esac
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+          echo "baseline_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Aider
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install --quiet aider-chat
+          aider --version
+
+      - name: Load runner scripts
+        env:
+          GH_TOKEN: ${{ secrets.AGENT_GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh api "repos/${{ github.repository }}/contents/.github/scripts/task-acceptance-gate.py?ref=${{ github.sha }}" --jq .content | base64 --decode > /tmp/task-acceptance-gate.py
+          gh api "repos/${{ github.repository }}/contents/.github/scripts/pai-agent-run.sh?ref=${{ github.sha }}" --jq .content | base64 --decode > /tmp/pai-agent-run.sh
+          test -s /tmp/task-acceptance-gate.py
+          test -s /tmp/pai-agent-run.sh
+          chmod +x /tmp/pai-agent-run.sh
+          echo "acceptance_gate_ref=${{ github.sha }}"
+
+      - name: Execute agent
+        id: agent
+        env:
+          GEMINI_API_KEY: ${{ secrets.LLM_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          LLM_PROVIDER: ${{ secrets.LLM_PROVIDER }}
+          DEEPSEEK_MODEL: ${{ secrets.DEEPSEEK_MODEL }}
+          OPENROUTER_MODEL: ${{ secrets.OPENROUTER_MODEL }}
+          TASK_PROMPT: ${{ inputs.prompt }}
+          TASK_ID: ${{ inputs.task_id }}
+          GH_TOKEN: ${{ secrets.AGENT_GITHUB_TOKEN }}
+          UPSTREAM_REPO: ${{ steps.prepare.outputs.upstream_repo }}
+          WRITABLE_REPO: ${{ steps.prepare.outputs.target_repo }}
+          BASE_BRANCH: ${{ steps.prepare.outputs.base_branch }}
+          AGENT_BRANCH: ${{ steps.branch.outputs.branch }}
+          BASELINE_SHA: ${{ steps.branch.outputs.baseline_sha }}
+        working-directory: workspace
+        run: /tmp/pai-agent-run.sh
+
+      - name: Verify remote branch
+        id: remote
+        if: steps.agent.outputs.has_changes == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.AGENT_GITHUB_TOKEN }}
+          WRITABLE_REPO: ${{ steps.prepare.outputs.target_repo }}
+          BRANCH: ${{ steps.agent.outputs.branch }}
+          COMMIT_SHA: ${{ steps.agent.outputs.commit }}
+        run: |
+          set -euo pipefail
+          echo "STAGE=REMOTE_BRANCH_VERIFICATION"
+          REMOTE_SHA=$(gh api "repos/${WRITABLE_REPO}/git/ref/heads/${BRANCH}" --jq .object.sha)
+          echo "remote=$REMOTE_SHA expected=$COMMIT_SHA"
+          test "$REMOTE_SHA" = "$COMMIT_SHA" || exit 1
+          echo "verified=true" >> "$GITHUB_OUTPUT"
+
+      - name: Create Pull Request
+        id: pr
+        if: steps.agent.outputs.has_changes == 'true' && steps.remote.outputs.verified == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.AGENT_GITHUB_TOKEN }}
+          TASK_ID: ${{ inputs.task_id }}
+          BASE_BRANCH: ${{ steps.prepare.outputs.base_branch }}
+          UPSTREAM_REPO: ${{ steps.prepare.outputs.upstream_repo }}
+          WRITABLE_REPO: ${{ steps.prepare.outputs.target_repo }}
+          AGENT_OWNER: ${{ steps.prepare.outputs.agent_owner }}
+          BRANCH: ${{ steps.agent.outputs.branch }}
+          COMMIT_SHA: ${{ steps.agent.outputs.commit }}
+        run: |
+          set -euo pipefail
+          echo "STAGE=PR_CREATION"
+          if [ "$WRITABLE_REPO" = "$UPSTREAM_REPO" ]; then HEAD_REF="$BRANCH"; else HEAD_REF="${AGENT_OWNER}:${BRANCH}"; fi
+          set +e
+          OUT=$(gh pr create --repo "$UPSTREAM_REPO" --base "$BASE_BRANCH" --head "$HEAD_REF" \
+            --title "[Personal AI Bot] ${TASK_ID}" \
+            --body "Automated task \`${TASK_ID}\`. Upstream \`${UPSTREAM_REPO}\`. Head \`${HEAD_REF}\`. Commit \`${COMMIT_SHA}\`." 2>&1)
+          EC=$?
+          set -e
+          echo "$OUT"
+          PR_URL=""
+          [ "$EC" -eq 0 ] && PR_URL=$(echo "$OUT" | grep -Eo 'https://github.com/[^ ]+' | tail -n1 || true)
+          [ -z "$PR_URL" ] && PR_URL=$(gh pr list --repo "$UPSTREAM_REPO" --head "$HEAD_REF" --json url --jq '.[0].url' 2>/dev/null || true)
+          test -n "$PR_URL" || { echo "STAGE=PR_CREATION failed"; exit 1; }
+          echo "STAGE=PR_VERIFICATION"
+          PR_BASE=$(gh pr view "$PR_URL" --json baseRefName --jq .baseRefName)
+          test "$PR_BASE" = "$BASE_BRANCH" || { echo "base mismatch $PR_BASE"; exit 1; }
+          echo "pull-request-url=$PR_URL" >> "$GITHUB_OUTPUT"
+
+      - name: Report final status
+        if: always()
+        env:
+          CALLBACK_TOKEN: ${{ inputs.callback_token }}
+          CALLBACK_URL: ${{ inputs.callback_url }}
+          VERCEL_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
+          WORKER_CALLBACK_SECRET: ${{ secrets.WORKER_CALLBACK_SECRET }}
+          RUN_ID: ${{ github.run_id }}
+          JOB_STATUS: ${{ job.status }}
+          PR_URL: ${{ steps.pr.outputs.pull-request-url }}
+          COMMIT_SHA: ${{ steps.agent.outputs.commit }}
+        run: |
+          set -uo pipefail
+          STATUS=FAILED
+          [ "$JOB_STATUS" = "success" ] && { [ -n "${PR_URL:-}" ] && STATUS=PR_CREATED || STATUS=COMPLETED; }
+          PAYLOAD=$(jq -n --arg status "$STATUS" --arg run "$RUN_ID" --arg commit "${COMMIT_SHA:-}" --arg pr "${PR_URL:-}" '{status:$status,workerRunId:$run,commitSha:$commit,prUrl:$pr}')
+          URL="$CALLBACK_URL"
+          if [ -n "${VERCEL_BYPASS_SECRET:-}" ]; then
+            case "$URL" in *\?*) URL="${URL}&x-vercel-protection-bypass=${VERCEL_BYPASS_SECRET}" ;;
+              *) URL="${URL}?x-vercel-protection-bypass=${VERCEL_BYPASS_SECRET}" ;; esac
+          fi
+          HDR=(-H "Content-Type: application/json" -H "x-worker-token: ${CALLBACK_TOKEN}")
+          [ -n "${WORKER_CALLBACK_SECRET:-}" ] && HDR+=(-H "x-worker-secret: ${WORKER_CALLBACK_SECRET}")
+          [ -n "${VERCEL_BYPASS_SECRET:-}" ] && HDR+=(-H "x-vercel-protection-bypass: ${VERCEL_BYPASS_SECRET}")
+          HTTP=$(curl -sS -o /tmp/final.txt -w "%{http_code}" -X PATCH "$URL" "${HDR[@]}" -d "$PAYLOAD" || echo 000)
+          echo "final_callback_http=$HTTP"; head -c 300 /tmp/final.txt || true; echo
+
+      - name: Cleanup
+        if: always()
+        run: rm -rf workspace || true
