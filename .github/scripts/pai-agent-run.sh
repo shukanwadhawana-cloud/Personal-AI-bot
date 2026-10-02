@@ -1,36 +1,53 @@
 #!/usr/bin/env bash
 # PAI agent execution: must run on agent/<task-id> only.
-# Selective context for large repos; does not invent implementation files.
+# Selective context + bounded multi-provider fallback. Does not invent files.
 set -euo pipefail
 BRANCH="${AGENT_BRANCH:?}"
 test "$(git branch --show-current)" = "$BRANCH" || { echo "STAGE=AGENT_EXECUTION failed expected=$BRANCH actual=$(git branch --show-current)"; exit 1; }
 
-PROVIDER="${LLM_PROVIDER:-auto}"
-MODEL=""
-export OPENAI_API_BASE="" OPENAI_API_KEY=""
-if [ "$PROVIDER" = "openrouter" ] || { [ "$PROVIDER" = "auto" ] && [ -n "${OPENROUTER_API_KEY:-}" ]; }; then
-  test -n "${OPENROUTER_API_KEY:-}"; export OPENAI_API_BASE="https://openrouter.ai/api/v1"; export OPENAI_API_KEY="$OPENROUTER_API_KEY"
-  MODEL="openai/${OPENROUTER_MODEL:-openrouter/free}"; ACTIVE_PROVIDER="openrouter"
-elif [ "$PROVIDER" = "deepseek" ] || { [ "$PROVIDER" = "auto" ] && [ -n "${DEEPSEEK_API_KEY:-}" ]; }; then
-  test -n "${DEEPSEEK_API_KEY:-}"; export OPENAI_API_BASE="https://api.deepseek.com"; export OPENAI_API_KEY="$DEEPSEEK_API_KEY"
-  MODEL="openai/${DEEPSEEK_MODEL:-deepseek-flash}"; ACTIVE_PROVIDER="deepseek"
-elif [ "$PROVIDER" = "gemini" ] || [ "$PROVIDER" = "auto" ]; then
-  test -n "${GEMINI_API_KEY:-}"; unset OPENAI_API_BASE OPENAI_API_KEY
-  MODEL="gemini/gemini-3.6-flash"; ACTIVE_PROVIDER="gemini"
-else echo "STAGE=AGENT_EXECUTION failed provider"; exit 1; fi
-echo "provider=$ACTIVE_PROVIDER model=$MODEL branch=$(git branch --show-current) HEAD=$(git rev-parse HEAD) baseline=$BASELINE_SHA"
-
-CONTEXT_SCRIPT="/tmp/pai-context-select.py"
-if [ ! -s "$CONTEXT_SCRIPT" ]; then
-  if [ -f ".github/scripts/pai-context-select.py" ]; then
-    cp ".github/scripts/pai-context-select.py" "$CONTEXT_SCRIPT"
+load_helper() {
+  local name="$1" dest="$2"
+  if [ -s "$dest" ]; then return 0; fi
+  if [ -f ".github/scripts/$name" ]; then
+    cp ".github/scripts/$name" "$dest"
   elif [ -n "${GH_TOKEN:-}" ] && [ -n "${GITHUB_REPOSITORY:-}" ]; then
     REF="${GITHUB_SHA:-main}"
-    gh api "repos/${GITHUB_REPOSITORY}/contents/.github/scripts/pai-context-select.py?ref=${REF}" --jq .content \
-      | base64 --decode > "$CONTEXT_SCRIPT" || true
+    gh api "repos/${GITHUB_REPOSITORY}/contents/.github/scripts/${name}?ref=${REF}" --jq .content \
+      | base64 --decode > "$dest" || true
   fi
+  test -s "$dest"
+}
+
+CONTEXT_SCRIPT="/tmp/pai-context-select.py"
+PROVIDER_SCRIPT="/tmp/pai-provider-select.py"
+load_helper pai-context-select.py "$CONTEXT_SCRIPT" || { echo "STAGE=AGENT_EXECUTION failed: missing pai-context-select.py"; exit 1; }
+load_helper pai-provider-select.py "$PROVIDER_SCRIPT" || { echo "STAGE=AGENT_EXECUTION failed: missing pai-provider-select.py"; exit 1; }
+
+if [ -z "${GEMINI_API_KEY:-}" ] && [ -n "${LLM_API_KEY:-}" ]; then
+  export GEMINI_API_KEY="$LLM_API_KEY"
 fi
-test -s "$CONTEXT_SCRIPT" || { echo "STAGE=AGENT_EXECUTION failed: missing pai-context-select.py"; exit 1; }
+
+PROVIDER_LINES=$(python3 "$PROVIDER_SCRIPT" 2>/tmp/provider_err.txt || true)
+if [ -z "${PROVIDER_LINES:-}" ]; then
+  echo "STAGE=AGENT_EXECUTION failed: no configured LLM providers"
+  cat /tmp/provider_err.txt 2>/dev/null || true
+  exit 1
+fi
+echo "provider_chain:"
+printf '%s\n' "$PROVIDER_LINES" | sed 's/ KEY_ENV=[^ ]*//'
+
+activate_provider() {
+  local name="$1" model="$2" base="$3" key_env="$4"
+  ACTIVE_PROVIDER="$name"
+  MODEL="$model"
+  if [ -n "$base" ]; then
+    export OPENAI_API_BASE="$base"
+    export OPENAI_API_KEY="${!key_env}"
+  else
+    unset OPENAI_API_BASE OPENAI_API_KEY || true
+  fi
+  echo "provider=$ACTIVE_PROVIDER model=$MODEL base=${OPENAI_API_BASE:-native} branch=$(git branch --show-current) HEAD=$(git rev-parse HEAD) baseline=$BASELINE_SHA"
+}
 
 select_context() {
   local aggressive_flag="${1:-0}"
@@ -45,6 +62,8 @@ build_aider_args_from_selection() {
   EXTRA_ARGS=()
   MAP_TOKENS=1024
   FILE_HINTS=""
+  SELECTED_FILE_COUNT=0
+  SELECTED_READ_COUNT=0
   local line
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
@@ -54,12 +73,14 @@ build_aider_args_from_selection() {
         if [ -e "$f" ]; then
           EXTRA_ARGS+=(--file "$f")
           FILE_HINTS="${FILE_HINTS} ${f}"
+          SELECTED_FILE_COUNT=$((SELECTED_FILE_COUNT + 1))
         fi
         ;;
       READ=*)
         f="${line#READ=}"
         if [ -e "$f" ]; then
           EXTRA_ARGS+=(--read "$f")
+          SELECTED_READ_COUNT=$((SELECTED_READ_COUNT + 1))
         fi
         ;;
       META=*) echo "context_$line" ;;
@@ -68,7 +89,7 @@ build_aider_args_from_selection() {
   FILE_HINTS="${FILE_HINTS# }"
   EXTRA_ARGS+=(--map-tokens "$MAP_TOKENS")
   EXTRA_ARGS+=(--no-show-model-warnings)
-  echo "map_tokens=$MAP_TOKENS file_hints=$FILE_HINTS extra_argc=${#EXTRA_ARGS[@]}"
+  echo "map_tokens=$MAP_TOKENS selected_file_count=$SELECTED_FILE_COUNT selected_read_count=$SELECTED_READ_COUNT file_hints=$FILE_HINTS"
 }
 
 SELECTION=$(select_context 0)
@@ -77,8 +98,8 @@ build_aider_args_from_selection <<< "$SELECTION"
 
 AGENT_INSTRUCTION=$(printf '%s\n\n---\nWorker constraints (mandatory):\n1. You are on branch %s. Do not checkout main/master/default.\n2. IMPLEMENT the requested changes with actual file edits. Do not only inspect, plan, or describe.\n3. If the task names specific files or paths to create/modify, those paths must be modified (or created when the task asks to create them).\n4. Prefer reading CONTRIBUTING.md / README / AGENTS.md / existing tests when present, then implement — do not edit guidance files unless the task explicitly asks to change them.\n5. Do not change unrelated config such as .gitignore unless the task explicitly requires it.\n6. Do not stop after exploration tool calls — finish by writing the code/docs the task requests.\n7. Do not invent task IDs, commit SHAs, or test results. The worker will write authoritative runtime proof metadata after acceptance.\n8. Only open/edit files needed for this task; do not load the entire repository into context.\n' "$TASK_PROMPT" "$BRANCH")
 
-is_token_limit_error() {
-  printf '%s' "$1" | grep -qiE 'token limit|context length|context window|maximum context|max_tokens|too many tokens|prompt is too long|maximum input'
+classify_failure() {
+  python3 "$PROVIDER_SCRIPT" --classify "$1"
 }
 
 run_aider() {
@@ -88,10 +109,14 @@ run_aider() {
   set -e
   printf '%s\n' "$AIDER_OUTPUT"
   test "$(git branch --show-current)" = "$BRANCH" || { echo "branch drift"; return 1; }
-  if is_token_limit_error "$AIDER_OUTPUT"; then
-    echo "token_limit_detected=1"
-    return 99
-  fi
+  local cat
+  cat=$(classify_failure "$AIDER_OUTPUT")
+  echo "failure_category=$cat aider_rc=$AIDER_RC provider=$ACTIVE_PROVIDER"
+  case "$cat" in
+    context) return 99 ;;
+    quota) return 98 ;;
+    auth) return 97 ;;
+  esac
   return "$AIDER_RC"
 }
 
@@ -112,37 +137,72 @@ hint_paths_touched() {
 }
 
 echo "STAGE=AGENT_EXECUTION"
-set +e
-run_aider "$AGENT_INSTRUCTION"
-RC=$?
-set -e
+FALLBACK_ATTEMPT=0
+PROVIDER_ATTEMPTED=""
+AGENT_OK=0
 
-if [ "$RC" = "99" ]; then
-  echo "Retry with reduced context after token limit"
-  SELECTION=$(select_context 1)
-  printf '%s\n' "$SELECTION"
+while IFS= read -r pline; do
+  [ -n "$pline" ] || continue
+  pname=$(printf '%s' "$pline" | sed -n 's/^PROVIDER=\([^ ]*\).*/\1/p')
+  pmodel=$(printf '%s' "$pline" | sed -n 's/.* MODEL=\([^ ]*\).*/\1/p')
+  pbase=$(printf '%s' "$pline" | sed -n 's/.* BASE=\([^ ]*\).*/\1/p')
+  pkey=$(printf '%s' "$pline" | sed -n 's/.* KEY_ENV=\([^ ]*\).*/\1/p')
+  [ -n "$pname" ] || continue
+  FALLBACK_ATTEMPT=$((FALLBACK_ATTEMPT + 1))
+  PROVIDER_ATTEMPTED="${PROVIDER_ATTEMPTED} ${pname}"
+  echo "fallback_attempt=$FALLBACK_ATTEMPT provider=$pname"
+  activate_provider "$pname" "$pmodel" "$pbase" "$pkey"
+
+  SELECTION=$(select_context 0)
   build_aider_args_from_selection <<< "$SELECTION"
+
   set +e
-  run_aider "$(printf '%s\n\nIMPORTANT: Context was reduced due to token limits. Edit only the files provided. Implement the task now.' "$AGENT_INSTRUCTION")"
+  run_aider "$AGENT_INSTRUCTION"
   RC=$?
   set -e
+
+  if [ "$RC" = "99" ]; then
+    echo "Retry with reduced context after token/context limit provider=$ACTIVE_PROVIDER"
+    SELECTION=$(select_context 1)
+    printf '%s\n' "$SELECTION"
+    build_aider_args_from_selection <<< "$SELECTION"
+    set +e
+    run_aider "$(printf '%s\n\nIMPORTANT: Context was reduced due to token limits. Edit only the files provided. Implement the task now.' "$AGENT_INSTRUCTION")"
+    RC=$?
+    set -e
+  fi
+
+  if [ "$RC" = "98" ] || [ "$RC" = "97" ]; then
+    echo "provider_switch reason=$( [ "$RC" = "98" ] && echo quota || echo auth ) from=$ACTIVE_PROVIDER"
+    continue
+  fi
+
+  if has_diff; then
+    AGENT_OK=1
+    break
+  fi
+
+  echo "Retry after empty edit provider=$ACTIVE_PROVIDER"
+  set +e
+  run_aider "$(printf '%s\n\nIMPORTANT: Apply the file change now. Write the actual file contents. Do not only plan.' "$AGENT_INSTRUCTION")"
+  RC=$?
+  set -e
+  if has_diff; then
+    AGENT_OK=1
+    break
+  fi
+  echo "provider_exhausted=$ACTIVE_PROVIDER no_diff=1"
+done <<< "$PROVIDER_LINES"
+
+if [ "$AGENT_OK" -ne 1 ] || ! has_diff; then
+  echo "STAGE=AGENT_EXECUTION failed: no repository changes produced"
+  echo "providers_attempted=${PROVIDER_ATTEMPTED# }"
+  exit 1
 fi
 
-if ! has_diff; then
-  echo "Retry after empty edit"
-  run_aider "$(printf '%s\n\nIMPORTANT: Apply the file change now. Write the actual file contents. Do not only plan.' "$AGENT_INSTRUCTION")" || true
-fi
 if has_diff && ! hint_paths_touched; then
   echo "Partial edit detected (hint paths still untouched); forcing implementation pass"
   run_aider "$(printf '%s\n\nIMPORTANT: Previous edits did not cover the required implementation paths (%s). Edit those files now with the requested behavior. Do not only add docs or .gitignore.' "$AGENT_INSTRUCTION" "$FILE_HINTS")" || true
-fi
-if ! has_diff && [ "$ACTIVE_PROVIDER" != "gemini" ] && [ -n "${GEMINI_API_KEY:-}" ]; then
-  unset OPENAI_API_BASE OPENAI_API_KEY; MODEL="gemini/gemini-3.6-flash"; ACTIVE_PROVIDER="gemini"
-  echo "Fallback $ACTIVE_PROVIDER"; run_aider "$AGENT_INSTRUCTION" || true
-fi
-if ! has_diff; then
-  echo "STAGE=AGENT_EXECUTION failed: no repository changes produced"
-  exit 1
 fi
 
 echo "STAGE=ACCEPTANCE_GATE"
@@ -234,6 +294,8 @@ final_commit_sha=PENDING_COMMIT
 acceptance=PASS
 verification=PASS
 verification_note=${VERIFY_NOTE}
+active_provider=${ACTIVE_PROVIDER:-}
+providers_attempted=${PROVIDER_ATTEMPTED# }
 worker_note=Runtime metadata written by PAI worker after acceptance and verification. Not model-invented.
 PROOF_EOF
 fi
