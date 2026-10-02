@@ -71,7 +71,7 @@ jobs:
           set -uo pipefail
           URL="$CALLBACK_URL"
           if [ -n "${VERCEL_BYPASS_SECRET:-}" ]; then
-            case "$URL" in *\?*) URL="${URL}&x-vercel-protection-bypass=${VERCEL_BYPASS_SECRET}" ;;
+            case "$URL" in *\\?*) URL="${URL}&x-vercel-protection-bypass=${VERCEL_BYPASS_SECRET}" ;;
               *) URL="${URL}?x-vercel-protection-bypass=${VERCEL_BYPASS_SECRET}" ;; esac
           fi
           HDR=(-H "Content-Type: application/json" -H "x-worker-token: ${CALLBACK_TOKEN}")
@@ -241,16 +241,94 @@ jobs:
         run: |
           set -euo pipefail
           echo "STAGE=PR_CREATION"
-          if [ "$WRITABLE_REPO" = "$UPSTREAM_REPO" ]; then HEAD_REF="$BRANCH"; else HEAD_REF="${AGENT_OWNER}:${BRANCH}"; fi
-          set +e
-          OUT=$(gh pr create --repo "$UPSTREAM_REPO" --base "$BASE_BRANCH" --head "$HEAD_REF" \
-            --title "[Personal AI Bot] ${TASK_ID}" \
-            --body "Automated task \`${TASK_ID}\`. Head \`${HEAD_REF}\` → \`${BASE_BRANCH}\`. Commit \`${COMMIT_SHA}\`." 2>&1)
-          EC=$?; set -e; echo "$OUT"
-          PR_URL=""; [ "$EC" -eq 0 ] && PR_URL=$(echo "$OUT" | grep -Eo 'https://github.com/[^ ]+' | tail -n1 || true)
-          [ -z "$PR_URL" ] && PR_URL=$(gh pr list --repo "$UPSTREAM_REPO" --head "$HEAD_REF" --json url --jq '.[0].url' 2>/dev/null || true)
-          test -n "$PR_URL" || { echo "STAGE=PR_CREATION failed"; exit 1; }
-          PR_BASE=$(gh pr view "$PR_URL" --json baseRefName --jq .baseRefName)
+          echo "upstream_repo=$UPSTREAM_REPO"
+          echo "writable_repo=$WRITABLE_REPO"
+          echo "base_branch=$BASE_BRANCH"
+          echo "agent_branch=$BRANCH"
+          echo "agent_owner=$AGENT_OWNER"
+          echo "commit_sha=$COMMIT_SHA"
+          if [ "$WRITABLE_REPO" = "$UPSTREAM_REPO" ]; then
+            HEAD_REF="$BRANCH"
+          else
+            HEAD_REF="${AGENT_OWNER}:${BRANCH}"
+          fi
+          echo "head_ref=$HEAD_REF"
+
+          find_existing_pr() {
+            local url=""
+            url=$(gh pr list --repo "$UPSTREAM_REPO" --head "$HEAD_REF" --base "$BASE_BRANCH" --state open --json url --jq '.[0].url // empty' 2>/dev/null || true)
+            if [ -z "$url" ] && [ "$WRITABLE_REPO" != "$UPSTREAM_REPO" ]; then
+              url=$(gh pr list --repo "$UPSTREAM_REPO" --head "$BRANCH" --base "$BASE_BRANCH" --state open --json url --jq '.[0].url // empty' 2>/dev/null || true)
+            fi
+            if [ -z "$url" ]; then
+              url=$(gh pr list --repo "$UPSTREAM_REPO" --state open --json url,headRefName --jq \
+                "[.[] | select(.headRefName == \"${BRANCH}\")] | .[0].url // empty" 2>/dev/null || true)
+            fi
+            printf '%s' "$url"
+          }
+
+          PR_URL=$(find_existing_pr || true)
+          if [ -n "${PR_URL:-}" ]; then
+            echo "existing_pr=$PR_URL"
+          else
+            set +e
+            OUT=$(gh pr create --repo "$UPSTREAM_REPO" --base "$BASE_BRANCH" --head "$HEAD_REF" \
+              --title "[Personal AI Bot] ${TASK_ID}" \
+              --body "Automated task \`${TASK_ID}\`. Head \`${HEAD_REF}\` → \`${BASE_BRANCH}\`. Commit \`${COMMIT_SHA}\`." 2>&1)
+            EC=$?
+            set -e
+            echo "gh_pr_create_exit=$EC"
+            echo "$OUT"
+            if [ "$EC" -eq 0 ]; then
+              PR_URL=$(echo "$OUT" | grep -Eo 'https://github.com/[^ ]+' | tail -n1 || true)
+            fi
+            if [ -z "${PR_URL:-}" ]; then
+              TITLE="[Personal AI Bot] ${TASK_ID}"
+              BODY="Automated task \`${TASK_ID}\`. Head \`${HEAD_REF}\` → \`${BASE_BRANCH}\`. Commit \`${COMMIT_SHA}\`."
+              PAYLOAD=$(jq -n --arg title "$TITLE" --arg body "$BODY" --arg head "$HEAD_REF" --arg base "$BASE_BRANCH" \
+                '{title:$title,body:$body,head:$head,base:$base}')
+              set +e
+              HTTP=$(curl -sS -o /tmp/pr_create.json -w "%{http_code}" -X POST \
+                -H "Accept: application/vnd.github+json" \
+                -H "Authorization: Bearer ${GH_TOKEN}" \
+                -H "X-GitHub-Api-Version: 2022-11-28" \
+                "https://api.github.com/repos/${UPSTREAM_REPO}/pulls" \
+                -d "$PAYLOAD")
+              set -e
+              echo "rest_pr_create_http=$HTTP"
+              head -c 800 /tmp/pr_create.json || true
+              echo
+              if [ "$HTTP" = "201" ]; then
+                PR_URL=$(jq -r '.html_url // empty' /tmp/pr_create.json)
+              elif [ "$HTTP" = "422" ]; then
+                PR_URL=$(find_existing_pr || true)
+                if [ -z "${PR_URL:-}" ]; then
+                  MSG=$(jq -r '.message // empty' /tmp/pr_create.json 2>/dev/null || true)
+                  ERRS=$(jq -r '.errors // [] | tostring' /tmp/pr_create.json 2>/dev/null || true)
+                  echo "rest_pr_validation_message=$MSG"
+                  echo "rest_pr_validation_errors=$ERRS"
+                fi
+              fi
+            fi
+            if [ -z "${PR_URL:-}" ]; then
+              PR_URL=$(find_existing_pr || true)
+            fi
+          fi
+
+          if [ -z "${PR_URL:-}" ]; then
+            echo "STAGE=PR_CREATION failed"
+            echo "pr_failure_context: could not create or find PR on $UPSTREAM_REPO"
+            echo "pr_failure_context: head=$HEAD_REF base=$BASE_BRANCH writable=$WRITABLE_REPO"
+            if [ "$WRITABLE_REPO" != "$UPSTREAM_REPO" ]; then
+              echo "pr_failure_hint: fork→upstream PR requires AGENT_GITHUB_TOKEN with pull_requests write on $UPSTREAM_REPO (fine-grained: grant that repo; classic: public_repo or repo scope)."
+            else
+              echo "pr_failure_hint: same-repo PR requires AGENT_GITHUB_TOKEN with pull_requests write on $UPSTREAM_REPO."
+            fi
+            exit 1
+          fi
+
+          PR_BASE=$(gh pr view "$PR_URL" --repo "$UPSTREAM_REPO" --json baseRefName --jq .baseRefName)
+          echo "pr_url=$PR_URL pr_base=$PR_BASE expected_base=$BASE_BRANCH"
           test "$PR_BASE" = "$BASE_BRANCH"
           echo "pull-request-url=$PR_URL" >> "$GITHUB_OUTPUT"
           echo "STAGE=PR_VERIFICATION ok $PR_URL"
@@ -273,7 +351,7 @@ jobs:
           PAYLOAD=$(jq -n --arg status "$STATUS" --arg run "$RUN_ID" --arg commit "${COMMIT_SHA:-}" --arg pr "${PR_URL:-}" '{status:$status,workerRunId:$run,commitSha:$commit,prUrl:$pr}')
           URL="$CALLBACK_URL"
           if [ -n "${VERCEL_BYPASS_SECRET:-}" ]; then
-            case "$URL" in *\?*) URL="${URL}&x-vercel-protection-bypass=${VERCEL_BYPASS_SECRET}" ;;
+            case "$URL" in *\\?*) URL="${URL}&x-vercel-protection-bypass=${VERCEL_BYPASS_SECRET}" ;;
               *) URL="${URL}?x-vercel-protection-bypass=${VERCEL_BYPASS_SECRET}" ;; esac
           fi
           HDR=(-H "Content-Type: application/json" -H "x-worker-token: ${CALLBACK_TOKEN}")
