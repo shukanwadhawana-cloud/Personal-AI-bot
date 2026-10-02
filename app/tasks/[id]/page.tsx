@@ -18,6 +18,9 @@ type Task = {
   prUrl?: string;
   deploymentUrl?: string;
   workerRunId?: string;
+  llmCalls?: number;
+  provider?: string;
+  model?: string;
   error?: string;
   result?: string;
   steps?: { id: string; name: string; status: 'RUNNING' | 'COMPLETED' | 'FAILED'; startedAt: string; completedAt?: string; detail?: string }[];
@@ -187,6 +190,7 @@ export default function TaskDetailPage() {
         <section style={sectionStyle}>
           <h2 style={h2Style}>Results</h2>
           <ul style={{ listStyle: 'none', padding: 0, margin: 0, fontSize: 14 }}>
+            {task.provider && <li>LLM provider: <code>{task.provider}</code>{task.model ? ` · ${task.model}` : ""}{typeof task.llmCalls === "number" ? ` · ${task.llmCalls} call${task.llmCalls === 1 ? "" : "s"}` : ""}</li>}
             {task.workerRunId && (
               <li>
                 Worker run:{' '}

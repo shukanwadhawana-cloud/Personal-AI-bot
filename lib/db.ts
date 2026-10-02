@@ -45,6 +45,9 @@ export async function ensureSchema(): Promise<void> {
       commit_sha    TEXT,
       pr_url        TEXT,
       deployment_url TEXT,
+      llm_calls    INTEGER,
+      provider     TEXT,
+      model        TEXT,
       worker_run_id TEXT,
       error         TEXT,
       result        TEXT,
@@ -60,6 +63,9 @@ export async function ensureSchema(): Promise<void> {
   `;
 
   await db`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS steps JSONB NOT NULL DEFAULT '[]'::jsonb`;
+  await db`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS llm_calls INTEGER`;
+  await db`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS provider TEXT`;
+  await db`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS model TEXT`;
   await db`CREATE INDEX IF NOT EXISTS idx_tasks_user_id ON tasks (user_id)`;
   await db`CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks (status)`;
   await db`CREATE INDEX IF NOT EXISTS idx_tasks_updated_at ON tasks (updated_at)`;
