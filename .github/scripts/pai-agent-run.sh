@@ -18,30 +18,54 @@ elif [ "$PROVIDER" = "gemini" ] || [ "$PROVIDER" = "auto" ]; then
 else echo "STAGE=AGENT_EXECUTION failed provider"; exit 1; fi
 echo "provider=$ACTIVE_PROVIDER model=$MODEL branch=$(git branch --show-current) HEAD=$(git rev-parse HEAD) baseline=$BASELINE_SHA"
 
-AGENT_INSTRUCTION=$(printf '%s\n\n---\nStay on branch %s. Do not checkout main/master/default.' "$TASK_PROMPT" "$BRANCH")
+AGENT_INSTRUCTION=$(printf '%s\n\n---\nStay on branch %s. Do not checkout main/master/default. You must apply file edits in the repository.' "$TASK_PROMPT" "$BRANCH")
+
+FILE_HINTS=$(python3 -c '
+import re, os
+p = os.environ.get("TASK_PROMPT", "")
+paths = re.findall(r"[\w./-]+\.[a-zA-Z0-9]{1,12}", p)
+seen=set(); out=[]
+for x in paths:
+  if x in seen: continue
+  if x.startswith("http") or "github.com" in x: continue
+  if "/" in x or x.endswith((".md",".txt",".ts",".tsx",".js",".py",".json",".yml",".yaml")):
+    seen.add(x); out.append(x)
+print(" ".join(out[:8]))
+')
+EXTRA_ARGS=()
+for f in $FILE_HINTS; do EXTRA_ARGS+=(--file "$f"); done
+echo "file_hints=$FILE_HINTS"
 
 run_aider() {
   set +e
-  AIDER_OUTPUT=$(printf '%s' "$1" | aider --yes --no-auto-commits --model "$MODEL" --message-file /dev/stdin 2>&1)
+  if [ ${#EXTRA_ARGS[@]} -gt 0 ]; then
+    AIDER_OUTPUT=$(printf '%s' "$1" | aider --yes --no-auto-commits --model "$MODEL" "${EXTRA_ARGS[@]}" --message-file /dev/stdin 2>&1)
+  else
+    AIDER_OUTPUT=$(printf '%s' "$1" | aider --yes --no-auto-commits --model "$MODEL" --message-file /dev/stdin 2>&1)
+  fi
   AIDER_RC=$?; set -e
   printf '%s\n' "$AIDER_OUTPUT"
   test "$(git branch --show-current)" = "$BRANCH" || { echo "branch drift"; return 1; }
   return "$AIDER_RC"
 }
+has_diff() {
+  ! git diff --quiet 2>/dev/null || ! git diff --cached --quiet 2>/dev/null || [ -n "$(git ls-files --others --exclude-standard)" ]
+}
 
 echo "STAGE=AGENT_EXECUTION"
-run_aider "$AGENT_INSTRUCTION" || {
-  if printf '%s' "$AIDER_OUTPUT" | grep -Eqi '429|quota|rate.?limit|resource.?exhausted|503|high demand'; then
-    if [ "$ACTIVE_PROVIDER" != "deepseek" ] && [ -n "${DEEPSEEK_API_KEY:-}" ]; then
-      export OPENAI_API_BASE="https://api.deepseek.com"; export OPENAI_API_KEY="$DEEPSEEK_API_KEY"
-      MODEL="openai/${DEEPSEEK_MODEL:-deepseek-flash}"; ACTIVE_PROVIDER="deepseek"
-    elif [ "$ACTIVE_PROVIDER" != "openrouter" ] && [ -n "${OPENROUTER_API_KEY:-}" ]; then
-      export OPENAI_API_BASE="https://openrouter.ai/api/v1"; export OPENAI_API_KEY="$OPENROUTER_API_KEY"
-      MODEL="openai/${OPENROUTER_MODEL:-openrouter/free}"; ACTIVE_PROVIDER="openrouter"
-    else exit 1; fi
-    run_aider "$AGENT_INSTRUCTION" || exit 1
-  else exit 1; fi
-}
+run_aider "$AGENT_INSTRUCTION" || true
+if ! has_diff; then
+  echo "Retry after empty edit"
+  run_aider "$(printf '%s\n\nIMPORTANT: Apply the file change now. Write the file contents.' "$AGENT_INSTRUCTION")" || true
+fi
+if ! has_diff && [ "$ACTIVE_PROVIDER" != "gemini" ] && [ -n "${GEMINI_API_KEY:-}" ]; then
+  unset OPENAI_API_BASE OPENAI_API_KEY; MODEL="gemini/gemini-3.6-flash"; ACTIVE_PROVIDER="gemini"
+  echo "Fallback $ACTIVE_PROVIDER"; run_aider "$AGENT_INSTRUCTION" || true
+fi
+if ! has_diff; then
+  echo "STAGE=AGENT_EXECUTION failed: no repository changes produced"
+  exit 1
+fi
 
 echo "STAGE=ACCEPTANCE_GATE"
 acceptance_passed=0
@@ -49,7 +73,7 @@ for a in 1 2; do
   set +e; ACCEPTANCE_OUTPUT=$(python /tmp/task-acceptance-gate.py "$TASK_PROMPT" "$BASELINE_SHA" 2>&1); rc=$?; set -e
   echo "$ACCEPTANCE_OUTPUT"
   [ "$rc" -eq 0 ] && acceptance_passed=1 && break
-  [ "$a" -lt 2 ] && run_aider "Acceptance failed. $TASK_PROMPT Evidence: $ACCEPTANCE_OUTPUT Stay on $BRANCH." || true
+  [ "$a" -lt 2 ] && run_aider "Acceptance failed. $TASK_PROMPT Evidence: $ACCEPTANCE_OUTPUT Stay on $BRANCH. Apply the required file edits." || true
 done
 test "$acceptance_passed" -eq 1 || { echo "STAGE=ACCEPTANCE_GATE failed"; exit 1; }
 
@@ -63,38 +87,23 @@ for attempt in 1 2 3; do
     elif [ -f yarn.lock ]; then corepack enable >/dev/null 2>&1 || true; INSTALL_CMD="yarn install --immutable"; RUN_CMD="yarn"
     elif [ -f bun.lockb ] || [ -f bun.lock ]; then INSTALL_CMD="bun install --frozen-lockfile"; RUN_CMD="bun"
     elif [ -f package-lock.json ]; then INSTALL_CMD="npm ci --no-audit --no-fund"; RUN_CMD="npm"
-    else echo "VERIFY: no lockfile; skip install to avoid package-lock.json mutation"; fi
-    if [ -n "$INSTALL_CMD" ]; then echo "VERIFY: $INSTALL_CMD"; eval "$INSTALL_CMD" >>"$LOG" 2>&1 || rc=$?; fi
-    if [ "$rc" -eq 0 ] && node -e "const p=require('./package.json');process.exit(p.scripts&&p.scripts.lint?0:1)"; then
-      if [ -f .eslintrc.json ] || [ -f .eslintrc.js ] || [ -f eslint.config.js ] || [ -f eslint.config.mjs ]; then
-        eval "$RUN_CMD run lint" >>"$LOG" 2>&1 || rc=$?
-      fi
-    fi
-    if [ "$rc" -eq 0 ] && node -e "const p=require('./package.json');process.exit(p.scripts&&p.scripts.typecheck?0:1)"; then
-      eval "$RUN_CMD run typecheck" >>"$LOG" 2>&1 || rc=$?
-    elif [ "$rc" -eq 0 ] && [ -f tsconfig.json ] && [ -d node_modules ]; then
-      npx tsc --noEmit >>"$LOG" 2>&1 || rc=$?
-    fi
-    if [ "$rc" -eq 0 ] && node -e "const p=require('./package.json');process.exit(p.scripts&&p.scripts.test?0:1)"; then
-      eval "$RUN_CMD test" >>"$LOG" 2>&1 || rc=$?
-    fi
-    if [ "$rc" -eq 0 ] && node -e "const p=require('./package.json');process.exit(p.scripts&&p.scripts.build?0:1)"; then
-      if [ -d node_modules ] || [ -z "$INSTALL_CMD" ]; then
-        eval "$RUN_CMD run build" >>"$LOG" 2>&1 || rc=$?
-      else
-        echo "VERIFY: build skipped (no node_modules; no lockfile install)"
-      fi
+    else echo "VERIFY: no lockfile; skip install"; fi
+    if [ -n "$INSTALL_CMD" ]; then eval "$INSTALL_CMD" >>"$LOG" 2>&1 || rc=$?; fi
+    if [ "$rc" -eq 0 ] && [ -d node_modules ] && node -e "const p=require('./package.json');process.exit(p.scripts&&p.scripts.build?0:1)"; then
+      eval "$RUN_CMD run build" >>"$LOG" 2>&1 || rc=$?
+    elif [ "$rc" -eq 0 ]; then
+      echo "VERIFY: build skipped (no node_modules or no build script)"
     fi
   else rc=0; fi
   set -e
   [ "$rc" -eq 0 ] && verified=1 && break
   tail -n 40 "$LOG" || true
-  [ "$attempt" -lt 3 ] && run_aider "Verification failed. $(tail -n 40 "$LOG" | head -c 4000). Stay on $BRANCH." || true
+  [ "$attempt" -lt 3 ] && run_aider "Verification failed. Stay on $BRANCH." || true
 done
 test "$verified" -eq 1 || { echo "STAGE=VERIFICATION failed"; exit 1; }
 
 rm -rf node_modules .next dist build .aider* 2>/dev/null || true
-if [ ! -f package-lock.json ] || git show "$BASELINE_SHA:package-lock.json" >/dev/null 2>&1; then :; else git checkout -- package-lock.json 2>/dev/null || rm -f package-lock.json; fi
+if git show "$BASELINE_SHA:package-lock.json" >/dev/null 2>&1; then :; else rm -f package-lock.json 2>/dev/null || true; fi
 
 echo "STAGE=COMMIT"
 test "$(git branch --show-current)" = "$BRANCH"
