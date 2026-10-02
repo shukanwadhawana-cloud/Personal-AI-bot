@@ -20,28 +20,47 @@ elif [ "$PROVIDER" = "gemini" ] || [ "$PROVIDER" = "auto" ]; then
 else echo "STAGE=AGENT_EXECUTION failed provider"; exit 1; fi
 echo "provider=$ACTIVE_PROVIDER model=$MODEL branch=$(git branch --show-current) HEAD=$(git rev-parse HEAD) baseline=$BASELINE_SHA"
 
-# Extract path-like tokens from the task for --file hints (Aider chat context).
+# Path hints for Aider --file. Skip guidance-only mentions (Follow CONTRIBUTING.md).
 FILE_HINTS=$(python3 -c '
 import re, os
 p = os.environ.get("TASK_PROMPT", "")
-paths = re.findall(r"[\w./-]+\.[a-zA-Z0-9]{1,12}", p)
+ref = re.compile(
+    r"\b(follow|following|read|reading|see|consult|refer(?:ring)?\s+to|"
+    r"according\s+to|per|based\s+on|as\s+(?:described|documented|stated)\s+in|"
+    r"instructions?\s+in|guidance\s+in)\b",
+    re.I,
+)
+impl = re.compile(
+    r"\b(add|create|implement|build|fix|update|refactor|remove|delete|replace|"
+    r"modify|change|make|write)\b",
+    re.I,
+)
+paths = list(re.finditer(r"[\w./-]+\.[a-zA-Z0-9]{1,12}", p))
 seen=set(); out=[]
-for x in paths:
+for m in paths:
+  x = m.group(0)
   if x in seen: continue
   if x.startswith("http") or "github.com" in x: continue
-  if "/" in x or x.endswith((".md",".txt",".ts",".tsx",".js",".jsx",".mjs",".cjs",".py",".json",".yml",".yaml",".css",".html")):
-    seen.add(x); out.append(x)
+  if not ("/" in x or x.endswith((".md",".txt",".ts",".tsx",".js",".jsx",".mjs",".cjs",".py",".json",".yml",".yaml",".css",".html"))):
+    continue
+  pre = p[max(0, m.start()-100):m.start()]
+  if ref.search(pre):
+    refs = list(ref.finditer(pre))
+    imps = list(impl.finditer(pre))
+    last_ref = refs[-1].start() if refs else -1
+    last_impl = imps[-1].start() if imps else -1
+    if last_ref > last_impl:
+      continue
+  seen.add(x); out.append(x)
 print(" ".join(out[:12]))
 ')
 EXTRA_ARGS=()
 for f in $FILE_HINTS; do
-  # Only pass --file for paths that already exist; Aider still creates new files via edits.
   if [ -e "$f" ]; then EXTRA_ARGS+=(--file "$f"); fi
 done
 echo "file_hints=$FILE_HINTS"
 
-# Strong instruction: implement, do not merely plan. Does not invent content for the worker.
-AGENT_INSTRUCTION=$(printf '%s\n\n---\nWorker constraints (mandatory):\n1. You are on branch %s. Do not checkout main/master/default.\n2. IMPLEMENT the requested changes with actual file edits. Do not only inspect, plan, or describe.\n3. If the task names specific files or paths, those paths must be modified (or created when the task asks to create them).\n4. Prefer reading CONTRIBUTING.md / README / existing tests when present, then implement.\n5. Do not change unrelated config such as .gitignore unless the task explicitly requires it.\n6. Do not stop after exploration tool calls — finish by writing the code/docs the task requests.\n' "$TASK_PROMPT" "$BRANCH")
+AGENT_INSTRUCTION=$(printf '%s\n\n---\nWorker constraints (mandatory):\n1. You are on branch %s. Do not checkout main/master/default.\n2. IMPLEMENT the requested changes with actual file edits. Do not only inspect, plan, or describe.\n3. If the task names specific files or paths to create/modify, those paths must be modified (or created when the task asks to create them).\n4. Prefer reading CONTRIBUTING.md / README / existing tests when present, then implement — do not edit guidance files unless the task explicitly asks to change them.\n5. Do not change unrelated config such as .gitignore unless the task explicitly requires it.\n6. Do not stop after exploration tool calls — finish by writing the code/docs the task requests.\n7. Do not invent task IDs, commit SHAs, or test results. The worker will write authoritative runtime proof metadata after acceptance.\n' "$TASK_PROMPT" "$BRANCH")
 
 run_aider() {
   set +e
@@ -60,8 +79,6 @@ has_diff() {
   ! git diff --quiet 2>/dev/null || ! git diff --cached --quiet 2>/dev/null || [ -n "$(git ls-files --others --exclude-standard)" ]
 }
 
-# True when every existing path in FILE_HINTS appears in the current change set.
-# Missing brand-new paths are left to the acceptance gate (authoritative).
 hint_paths_touched() {
   [ -z "${FILE_HINTS// }" ] && return 0
   local changed
@@ -123,6 +140,7 @@ test "$acceptance_passed" -eq 1 || { echo "STAGE=ACCEPTANCE_GATE failed"; exit 1
 
 echo "STAGE=VERIFICATION"
 verified=0
+VERIFY_NOTE="skipped (no package.json build)"
 for attempt in 1 2 3; do
   set +e; rc=0; LOG="/tmp/v$attempt.log"; : > "$LOG"
   if [ -f package.json ]; then
@@ -135,10 +153,14 @@ for attempt in 1 2 3; do
     if [ -n "$INSTALL_CMD" ]; then eval "$INSTALL_CMD" >>"$LOG" 2>&1 || rc=$?; fi
     if [ "$rc" -eq 0 ] && [ -d node_modules ] && node -e "const p=require('./package.json');process.exit(p.scripts&&p.scripts.build?0:1)"; then
       eval "$RUN_CMD run build" >>"$LOG" 2>&1 || rc=$?
+      VERIFY_NOTE="$RUN_CMD run build rc=$rc"
     elif [ "$rc" -eq 0 ]; then
       echo "VERIFY: build skipped (no node_modules or no build script)"
+      VERIFY_NOTE="build skipped"
+    else
+      VERIFY_NOTE="install/build failed rc=$rc"
     fi
-  else rc=0; fi
+  else rc=0; VERIFY_NOTE="no package.json"; fi
   set -e
   [ "$rc" -eq 0 ] && verified=1 && break
   tail -n 40 "$LOG" || true
@@ -148,6 +170,41 @@ test "$verified" -eq 1 || { echo "STAGE=VERIFICATION failed"; exit 1; }
 
 rm -rf node_modules .next dist build .aider* 2>/dev/null || true
 if git show "$BASELINE_SHA:package-lock.json" >/dev/null 2>&1; then :; else rm -f package-lock.json 2>/dev/null || true; fi
+
+# Drop unsolicited .gitignore edits (task must explicitly request .gitignore).
+if ! printf '%s' "$TASK_PROMPT" | grep -qiE '\.gitignore'; then
+  if git diff --name-only "$BASELINE_SHA" | grep -qx '.gitignore' \
+    || git ls-files --others --exclude-standard | grep -qx '.gitignore'; then
+    echo "Discarding unsolicited .gitignore change"
+    git checkout "$BASELINE_SHA" -- .gitignore 2>/dev/null || rm -f .gitignore 2>/dev/null || true
+  fi
+fi
+
+# Authoritative E2E proof: only after acceptance+verification, with real runtime values.
+# Never leave agent-invented placeholders (<baseline-sha>, fake task ids) as final proof.
+PROOF_PATH="docs/personal-ai-bot-e2e-proof.md"
+need_proof=0
+if printf '%s' "$TASK_PROMPT" | grep -q 'personal-ai-bot-e2e-proof'; then need_proof=1; fi
+if [ -f "$PROOF_PATH" ]; then need_proof=1; fi
+if [ "$need_proof" -eq 1 ]; then
+  mkdir -p docs
+  cat > "$PROOF_PATH" <<PROOF_EOF
+# Personal AI Bot E2E proof (worker-authored)
+
+PERSONAL_AI_BOT_E2E_PROOF=PASS
+task_id=${TASK_ID}
+upstream_repo=${UPSTREAM_REPO:-}
+writable_repo=${WRITABLE_REPO:-}
+agent_branch=${BRANCH}
+target_base_branch=${BASE_BRANCH:-}
+baseline_sha=${BASELINE_SHA}
+final_commit_sha=PENDING_COMMIT
+acceptance=PASS
+verification=PASS
+verification_note=${VERIFY_NOTE}
+worker_note=Runtime metadata written by PAI worker after acceptance and verification. Not model-invented.
+PROOF_EOF
+fi
 
 echo "STAGE=COMMIT"
 test "$(git branch --show-current)" = "$BRANCH"
@@ -159,6 +216,17 @@ else
   git commit -m "agent(${TASK_ID}): automated changes"
 fi
 COMMIT_SHA=$(git rev-parse HEAD)
+
+# Stamp real implementation commit SHA into worker-authored proof (one extra commit).
+if [ "$need_proof" -eq 1 ] && [ -f "$PROOF_PATH" ]; then
+  sed -i "s/^final_commit_sha=.*/final_commit_sha=${COMMIT_SHA}/" "$PROOF_PATH"
+  git add "$PROOF_PATH"
+  if ! git diff --cached --quiet; then
+    git commit -m "agent(${TASK_ID}): worker e2e proof metadata"
+    COMMIT_SHA=$(git rev-parse HEAD)
+  fi
+fi
+
 test "$(git branch --show-current)" = "$BRANCH"
 echo "STAGE=PUSH branch=$BRANCH commit=$COMMIT_SHA"
 git push -u origin "refs/heads/${BRANCH}:refs/heads/${BRANCH}"

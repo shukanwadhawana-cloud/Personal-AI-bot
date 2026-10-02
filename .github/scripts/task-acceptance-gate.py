@@ -5,9 +5,9 @@ Fails when the agent produced no meaningful work, or when paths the prompt
 explicitly asked to create/modify/delete are missing, or when exact-content
 requirements are not met.
 
-Does NOT treat repository identifiers (owner/repo), URLs, or conceptual
-slash phrases (e.g. page/route, API/data-access, verification/acceptance)
-as required filesystem paths.
+Does NOT treat repository identifiers (owner/repo), URLs, conceptual slash
+phrases, or guidance/reference mentions (e.g. "Follow CONTRIBUTING.md") as
+required modification paths.
 """
 from __future__ import annotations
 
@@ -43,69 +43,21 @@ OWNER_REPO_RE = re.compile(
 )
 
 CONTEXTUAL_SEGMENT_BLOCKLIST = {
-    "verification",
-    "acceptance",
-    "process",
-    "pipeline",
-    "workflow",
-    "repository",
-    "github",
-    "branch",
-    "commit",
-    "pull",
-    "request",
-    "status",
-    "callback",
-    "deploy",
-    "deployment",
-    "production",
-    "staging",
-    "page",
-    "route",
-    "api",
-    "ui",
-    "data",
-    "access",
-    "control",
-    "plane",
-    "worker",
-    "run",
-    "task",
-    "application",
-    "feature",
-    "logic",
-    "service",
-    "backend",
-    "frontend",
+    "verification", "acceptance", "process", "pipeline", "workflow", "repository",
+    "github", "branch", "commit", "pull", "request", "status", "callback",
+    "deploy", "deployment", "production", "staging", "page", "route", "api",
+    "ui", "data", "access", "control", "plane", "worker", "run", "task",
+    "application", "feature", "logic", "service", "backend", "frontend",
 }
 
 TECHNOLOGY_DOTTED_NAMES = {
-    "next.js",
-    "nuxt.js",
-    "vue.js",
-    "node.js",
-    "react.js",
-    "express.js",
-    "nest.js",
-    "angular.js",
-    "three.js",
-    "d3.js",
-    "socket.io",
+    "next.js", "nuxt.js", "vue.js", "node.js", "react.js", "express.js",
+    "nest.js", "angular.js", "three.js", "d3.js", "socket.io",
 }
 
 KNOWN_SOURCE_ROOTS = (
-    "src/",
-    "app/",
-    "lib/",
-    "tests/",
-    "test/",
-    "__tests__/",
-    "pages/",
-    "components/",
-    "scripts/",
-    "packages/",
-    ".github/",
-    "docs/",
+    "src/", "app/", "lib/", "tests/", "test/", "__tests__/", "pages/",
+    "components/", "scripts/", "packages/", ".github/", "docs/",
 )
 
 IMPLEMENTATION_VERBS = re.compile(
@@ -117,6 +69,13 @@ EXPLICIT_CODE_INTENT = re.compile(
     r"\b(api|route|endpoint|component|page|database|schema|table|function|class|"
     r"workflow|worker|dashboard|queue|test|feature|logic|backend|frontend|ui|"
     r"service|auth|callback|deploy|deployment|file)\b",
+    re.I,
+)
+
+REFERENCE_VERBS = re.compile(
+    r"\b(follow|following|read|reading|see|consult|refer(?:ring)?\s+to|"
+    r"according\s+to|per|based\s+on|as\s+(?:described|documented|stated|noted)\s+in|"
+    r"instructions?\s+in|guidance\s+in|rules?\s+in)\b",
     re.I,
 )
 
@@ -219,6 +178,24 @@ def is_plausible_filesystem_path(path: str) -> bool:
     return any(lower.startswith(root) for root in KNOWN_SOURCE_ROOTS)
 
 
+def is_reference_only_mention(prompt: str, match_start: int) -> bool:
+    """True when the path is mentioned only as guidance to follow/read, not to edit.
+
+    Example: 'Follow CONTRIBUTING.md and REVIEWING.md instructions.'
+    Counter-example: 'Update CONTRIBUTING.md to document the new test.'
+    """
+    pre = prompt[max(0, match_start - 100) : match_start]
+    if not REFERENCE_VERBS.search(pre):
+        return False
+    ref_spans = [(m.start(), m.end()) for m in REFERENCE_VERBS.finditer(pre)]
+    impl_spans = [(m.start(), m.end()) for m in IMPLEMENTATION_VERBS.finditer(pre)]
+    if not ref_spans:
+        return False
+    last_ref = ref_spans[-1][0]
+    last_impl = impl_spans[-1][0] if impl_spans else -1
+    return last_ref > last_impl
+
+
 def extract_explicit_required_paths(prompt: str) -> Set[str]:
     required: Set[str] = set()
 
@@ -232,12 +209,18 @@ def extract_explicit_required_paths(prompt: str) -> Set[str]:
             groups = [g for g in m.groups() if g]
             for g in groups:
                 path = normalize_path(g)
-                if is_plausible_filesystem_path(path):
-                    required.add(path)
+                if not is_plausible_filesystem_path(path):
+                    continue
+                abs_start = start + m.start()
+                if is_reference_only_mention(prompt, abs_start):
+                    continue
+                required.add(path)
 
     for m in NAMED_FILE_RE.finditer(prompt):
         path = normalize_path(m.group("name") or "")
         if path and is_plausible_filesystem_path(path):
+            if is_reference_only_mention(prompt, m.start()):
+                continue
             required.add(path)
 
     return required
@@ -390,7 +373,6 @@ def evaluate(
 
 
 def _expand_dir_entries(paths: Sequence[str]) -> List[str]:
-    """If git reports an untracked directory as 'docs/', list files under it."""
     out: List[str] = []
     for p in paths:
         p = p.replace("\\", "/")
@@ -411,7 +393,6 @@ def _expand_dir_entries(paths: Sequence[str]) -> List[str]:
 
 
 def collect_git_changes(baseline: str) -> List[str]:
-    # Prefer explicit untracked file list so 'docs/' is expanded to files.
     tracked = run_git("git", "diff", "--name-only", baseline).splitlines()
     untracked = run_git("git", "ls-files", "--others", "--exclude-standard").splitlines()
     combined = [p for p in tracked + untracked if p]
@@ -438,7 +419,6 @@ def _self_test() -> None:
     assert not passed, (reasons, diag)
     assert any("unexpected file(s) changed" in r for r in reasons), reasons
 
-    # Directory path under required file should satisfy the file requirement
     passed, reasons, diag = evaluate(
         "Create or update the file docs/agent-smoke-test.md so it contains exactly one line:\n"
         "E2E worker smoke test passed.\n\nDo not modify any other files.",
@@ -446,6 +426,41 @@ def _self_test() -> None:
         file_contents={"docs/agent-smoke-test.md": "E2E worker smoke test passed.\n"},
     )
     assert passed, (reasons, diag)
+
+    # 1. Reference-only guidance files must NOT be required changes.
+    guide_prompt = (
+        "Implement a focused regression-test improvement for the Viewer. "
+        "Follow the repository's CONTRIBUTING.md and REVIEWING.md instructions. "
+        "Update viewer/focus.js and add a short note to docs/personal-ai-bot-e2e-proof.md."
+    )
+    paths = extract_explicit_required_paths(guide_prompt)
+    assert "CONTRIBUTING.md" not in paths, paths
+    assert "REVIEWING.md" not in paths, paths
+    # 2. Explicit implementation path is required.
+    assert "viewer/focus.js" in paths, paths
+    # 3. Explicit proof path is required.
+    assert "docs/personal-ai-bot-e2e-proof.md" in paths, paths
+
+    only_follow = (
+        "Implement something useful in the codebase. "
+        "Follow CONTRIBUTING.md carefully before starting."
+    )
+    paths2 = extract_explicit_required_paths(only_follow)
+    assert "CONTRIBUTING.md" not in paths2, paths2
+
+    # Explicit edit of CONTRIBUTING.md must still be required.
+    edit_guide = "Update CONTRIBUTING.md to document the new regression test process."
+    paths3 = extract_explicit_required_paths(edit_guide)
+    assert "CONTRIBUTING.md" in paths3, paths3
+
+    # 4. Missing genuine implementation path still fails acceptance.
+    passed, reasons, diag = evaluate(
+        "Update viewer/focus.js to improve reachability checks. Follow CONTRIBUTING.md.",
+        ["docs/personal-ai-bot-e2e-proof.md"],
+    )
+    assert not passed, (reasons, diag)
+    assert "viewer/focus.js" in diag["missing"], diag
+    assert "CONTRIBUTING.md" not in diag["required_paths"], diag
 
 
 def main(argv: Sequence[str]) -> int:
