@@ -12,9 +12,9 @@ on:
         required: true
         type: string
       target_branch:
-        description: Base branch
+        description: Base branch; leave empty to use the target repository default branch
         required: false
-        default: main
+        default: ""
         type: string
       prompt:
         description: Natural language coding instruction
@@ -138,8 +138,18 @@ jobs:
               exit 1
             }
           fi
+          REQUESTED_BRANCH="${{ inputs.target_branch }}"
+          if [ -n "$REQUESTED_BRANCH" ]; then
+            BASE_BRANCH="$REQUESTED_BRANCH"
+          else
+            BASE_BRANCH=$(gh api "repos/$TARGET_REPO" --jq '.default_branch')
+          fi
+          test -n "$BASE_BRANCH" || { echo "ERROR: could not resolve target base branch"; exit 1; }
+          gh api "repos/$TARGET_REPO/branches/$BASE_BRANCH" >/dev/null
+          echo "Resolved target base branch: $BASE_BRANCH"
           echo "target_repo=$WRITABLE_REPO" >> "$GITHUB_OUTPUT"
           echo "upstream_repo=$TARGET_REPO" >> "$GITHUB_OUTPUT"
+          echo "target_branch=$BASE_BRANCH" >> "$GITHUB_OUTPUT"
 
       - name: Checkout target repository
         uses: actions/checkout@v4
@@ -147,7 +157,7 @@ jobs:
           repository: ${{ steps.prepare.outputs.target_repo }}
           token: ${{ secrets.AGENT_GITHUB_TOKEN }}
           path: workspace
-          ref: ${{ inputs.target_branch }}
+          ref: ${{ steps.prepare.outputs.target_branch }}
           fetch-depth: 0
 
       - name: Setup Python
@@ -186,7 +196,7 @@ jobs:
           GH_TOKEN: ${{ secrets.AGENT_GITHUB_TOKEN }}
           UPSTREAM_REPO: ${{ inputs.target_repo }}
           WRITABLE_REPO: ${{ steps.prepare.outputs.target_repo }}
-          TARGET_BRANCH: ${{ inputs.target_branch }}
+          TARGET_BRANCH: ${{ steps.prepare.outputs.target_branch }}
         working-directory: workspace
         run: |
           set -euo pipefail
@@ -292,45 +302,46 @@ jobs:
             VERIFY_LOG="/tmp/verify-attempt-$attempt.log"
             : > "$VERIFY_LOG"
             if [ -f package.json ]; then
-              if [ -f package-lock.json ]; then
-                echo "VERIFY: npm ci" | tee -a "$VERIFY_LOG"
-                npm ci --no-audit --no-fund >>"$VERIFY_LOG" 2>&1 || rc=$?
+              PKG_MANAGER=""
+              INSTALL_CMD=""
+              RUN_CMD=""
+              if [ -f pnpm-lock.yaml ]; then
+                PKG_MANAGER="pnpm"; corepack enable >/dev/null 2>&1 || true
+                INSTALL_CMD="pnpm install --frozen-lockfile"; RUN_CMD="pnpm"
+              elif [ -f yarn.lock ]; then
+                PKG_MANAGER="yarn"; corepack enable >/dev/null 2>&1 || true
+                INSTALL_CMD="yarn install --immutable"; RUN_CMD="yarn"
+              elif [ -f bun.lockb ] || [ -f bun.lock ]; then
+                PKG_MANAGER="bun"; INSTALL_CMD="bun install --frozen-lockfile"; RUN_CMD="bun"
+              elif [ -f package-lock.json ]; then
+                PKG_MANAGER="npm"; INSTALL_CMD="npm ci --no-audit --no-fund"; RUN_CMD="npm"
               else
-                echo "VERIFY: npm install" | tee -a "$VERIFY_LOG"
-                npm install --no-audit --no-fund >>"$VERIFY_LOG" 2>&1 || rc=$?
+                PKG_MANAGER="npm"
+                echo "VERIFY: no lockfile; skipping dependency install to avoid mutating the repository"
+                RUN_CMD="npm"
+              fi
+              echo "VERIFY: package manager=$PKG_MANAGER"
+              if [ -n "$INSTALL_CMD" ]; then
+                echo "VERIFY: $INSTALL_CMD" | tee -a "$VERIFY_LOG"
+                eval "$INSTALL_CMD" >>"$VERIFY_LOG" 2>&1 || rc=$?
               fi
               if [ "$rc" -eq 0 ] && node -e "const p=require('./package.json'); process.exit(p.scripts&&p.scripts.lint?0:1)"; then
                 if [ -f .eslintrc.json ] || [ -f .eslintrc.js ] || [ -f eslint.config.js ] || [ -f eslint.config.mjs ]; then
-                  echo "VERIFY: npm run lint" | tee -a "$VERIFY_LOG"
-                  CI=true npm run lint >>"$VERIFY_LOG" 2>&1 || rc=$?
-                else
-                  echo "VERIFY: lint skipped (no eslint config)"
+                  echo "VERIFY: $RUN_CMD run lint" | tee -a "$VERIFY_LOG"
+                  eval "$RUN_CMD run lint" >>"$VERIFY_LOG" 2>&1 || rc=$?
                 fi
-              else
-                echo "VERIFY: lint skipped or prior fail"
               fi
-              if [ "$rc" -eq 0 ]; then
-                if node -e "const p=require('./package.json'); process.exit(p.scripts&&p.scripts.typecheck?0:1)"; then
-                  echo "VERIFY: npm run typecheck" | tee -a "$VERIFY_LOG"
-                  npm run typecheck >>"$VERIFY_LOG" 2>&1 || rc=$?
-                elif [ -f tsconfig.json ]; then
-                  echo "VERIFY: npx tsc --noEmit" | tee -a "$VERIFY_LOG"
-                  npx tsc --noEmit >>"$VERIFY_LOG" 2>&1 || rc=$?
-                else
-                  echo "VERIFY: typecheck skipped"
-                fi
+              if [ "$rc" -eq 0 ] && node -e "const p=require('./package.json'); process.exit(p.scripts&&p.scripts.typecheck?0:1)"; then
+                echo "VERIFY: $RUN_CMD run typecheck" | tee -a "$VERIFY_LOG"
+                eval "$RUN_CMD run typecheck" >>"$VERIFY_LOG" 2>&1 || rc=$?
               fi
               if [ "$rc" -eq 0 ] && node -e "const p=require('./package.json'); process.exit(p.scripts&&p.scripts.test?0:1)"; then
-                echo "VERIFY: npm test" | tee -a "$VERIFY_LOG"
-                npm test --if-present >>"$VERIFY_LOG" 2>&1 || rc=$?
-              else
-                echo "VERIFY: test skipped or prior fail"
+                echo "VERIFY: $RUN_CMD test" | tee -a "$VERIFY_LOG"
+                eval "$RUN_CMD test" >>"$VERIFY_LOG" 2>&1 || rc=$?
               fi
               if [ "$rc" -eq 0 ] && node -e "const p=require('./package.json'); process.exit(p.scripts&&p.scripts.build?0:1)"; then
-                echo "VERIFY: npm run build" | tee -a "$VERIFY_LOG"
-                npm run build >>"$VERIFY_LOG" 2>&1 || rc=$?
-              else
-                echo "VERIFY: build skipped or prior fail"
+                echo "VERIFY: $RUN_CMD run build" | tee -a "$VERIFY_LOG"
+                eval "$RUN_CMD run build" >>"$VERIFY_LOG" 2>&1 || rc=$?
               fi
             else
               echo "VERIFY: no package.json"
