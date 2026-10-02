@@ -79,10 +79,6 @@ CONTEXTUAL_SEGMENT_BLOCKLIST = {
     "frontend",
 }
 
-
-# Common technology/framework names that contain a dot but are not filesystem paths.
-# These must never become required paths unless the prompt explicitly identifies them
-# as a filename/path (for example, by using a path root, quotes, or "file named").
 TECHNOLOGY_DOTTED_NAMES = {
     "next.js",
     "nuxt.js",
@@ -109,6 +105,7 @@ KNOWN_SOURCE_ROOTS = (
     "scripts/",
     "packages/",
     ".github/",
+    "docs/",
 )
 
 IMPLEMENTATION_VERBS = re.compile(
@@ -123,7 +120,6 @@ EXPLICIT_CODE_INTENT = re.compile(
     re.I,
 )
 
-# Path tokens with file extensions (supports [id] segments).
 PATH_WITH_EXT_RE = re.compile(
     r"(?:`([^`\n]+\.[A-Za-z0-9_.-]+)`|\"([^\"\n]+\.[A-Za-z0-9_.-]+)\"|"
     r"'([^'\n]+\.[A-Za-z0-9_.-]+)'|"
@@ -216,8 +212,6 @@ def is_plausible_filesystem_path(path: str) -> bool:
     if looks_like_url(path) or is_owner_repo(path) or is_conceptual_slash_phrase(path):
         return False
     lower = path.lower().strip("/")
-    # A bare dotted technology name such as "Next.js" is prose, not a path.
-    # Real dotted files (README.md, package.json, app.tsx, etc.) remain valid.
     if "/" not in lower and lower in TECHNOLOGY_DOTTED_NAMES:
         return False
     if has_file_extension(path):
@@ -228,11 +222,9 @@ def is_plausible_filesystem_path(path: str) -> bool:
 def extract_explicit_required_paths(prompt: str) -> Set[str]:
     required: Set[str] = set()
 
-    # Only consider paths when an implementation verb is present.
     if not IMPLEMENTATION_VERBS.search(prompt):
         return required
 
-    # Split into sentence-ish windows around verbs and collect path-with-ext tokens.
     for verb_match in IMPLEMENTATION_VERBS.finditer(prompt):
         start = verb_match.start()
         window = prompt[start : start + 240]
@@ -294,7 +286,6 @@ def read_file_content(path: str) -> Optional[str]:
 
 
 def has_strict_change_scope(prompt: str) -> bool:
-    """Return True when the prompt explicitly limits the allowed file changes."""
     p = prompt.lower()
     scope_phrases = (
         "do not modify, delete, reorder, or reformat any existing files",
@@ -398,16 +389,37 @@ def evaluate(
     return (len(reasons) == 0), reasons, diagnostics
 
 
-def collect_git_changes(baseline: str) -> List[str]:
-    status = run_git("git", "status", "--porcelain").splitlines()
-    tracked = run_git("git", "diff", "--name-only", baseline).splitlines()
-    untracked = [line[3:] for line in status if line.startswith("?? ")]
-    return sorted({p for p in tracked + untracked if p})
+def _expand_dir_entries(paths: Sequence[str]) -> List[str]:
+    """If git reports an untracked directory as 'docs/', list files under it."""
+    out: List[str] = []
+    for p in paths:
+        p = p.replace("\\", "/")
+        if not p:
+            continue
+        if p.endswith("/") or (os.path.isdir(p) and not has_file_extension(p)):
+            root = p.rstrip("/")
+            if os.path.isdir(root):
+                for dirpath, _dirnames, filenames in os.walk(root):
+                    for name in filenames:
+                        full = os.path.join(dirpath, name).replace("\\", "/")
+                        out.append(full)
+            else:
+                out.append(p.rstrip("/"))
+        else:
+            out.append(p)
+    return out
 
+
+def collect_git_changes(baseline: str) -> List[str]:
+    # Prefer explicit untracked file list so 'docs/' is expanded to files.
+    tracked = run_git("git", "diff", "--name-only", baseline).splitlines()
+    untracked = run_git("git", "ls-files", "--others", "--exclude-standard").splitlines()
+    combined = [p for p in tracked + untracked if p]
+    expanded = _expand_dir_entries(combined)
+    return sorted({p.replace("\\", "/") for p in expanded if p})
 
 
 def _self_test() -> None:
-    """Regression checks for prose terms being mistaken for filesystem paths."""
     passed, _, diag = evaluate(
         "Add a short Architecture overview to README.md describing the Next.js/Vercel control plane and Neon.",
         ["README.md"],
@@ -425,6 +437,15 @@ def _self_test() -> None:
     )
     assert not passed, (reasons, diag)
     assert any("unexpected file(s) changed" in r for r in reasons), reasons
+
+    # Directory path under required file should satisfy the file requirement
+    passed, reasons, diag = evaluate(
+        "Create or update the file docs/agent-smoke-test.md so it contains exactly one line:\n"
+        "E2E worker smoke test passed.\n\nDo not modify any other files.",
+        ["docs/agent-smoke-test.md"],
+        file_contents={"docs/agent-smoke-test.md": "E2E worker smoke test passed.\n"},
+    )
+    assert passed, (reasons, diag)
 
 
 def main(argv: Sequence[str]) -> int:
