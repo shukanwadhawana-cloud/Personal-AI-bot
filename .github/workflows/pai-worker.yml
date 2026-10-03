@@ -33,6 +33,11 @@ on:
         required: false
         default: false
         type: boolean
+      auto_merge:
+        description: Queue the generated PR for squash merge after required CI checks pass
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -351,6 +356,16 @@ jobs:
           echo "pull-request-url=$PR_URL" >> "$GITHUB_OUTPUT"
           echo "STAGE=PR_VERIFICATION ok $PR_URL"
 
+      - name: Queue PR for merge after CI
+        if: steps.pr.outputs.pull-request-url != '' && inputs.auto_merge == true
+        env:
+          GH_TOKEN: ${{ secrets.AGENT_GITHUB_TOKEN }}
+          PR_URL: ${{ steps.pr.outputs.pull-request-url }}
+        run: |
+          set -euo pipefail
+          echo "STAGE=QUEUE_MERGE_AFTER_CI"
+          gh pr merge "$PR_URL" --squash --auto --delete-branch
+          echo "merge_queued=true"
       - name: Report final status
         if: always()
         env:
