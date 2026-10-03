@@ -96,8 +96,8 @@ jobs:
         id: prepare
         env:
           TARGET_REPO: ${{ inputs.target_repo }}
-          REQUESTED_BRANCH: \${{ inputs.target_branch }}
-          CREATE_REPOSITORY: \${{ inputs.create_repository }}
+          REQUESTED_BRANCH: ${{ inputs.target_branch }}
+          CREATE_REPOSITORY: ${{ inputs.create_repository }}
           GH_TOKEN: ${{ secrets.AGENT_GITHUB_TOKEN }}
         run: |
           set -euo pipefail
