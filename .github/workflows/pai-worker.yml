@@ -28,6 +28,11 @@ on:
         description: Per-task callback credential
         required: true
         type: string
+      create_repository:
+        description: Create target repository automatically when it does not exist (same authenticated owner only)
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -86,7 +91,8 @@ jobs:
         id: prepare
         env:
           TARGET_REPO: ${{ inputs.target_repo }}
-          REQUESTED_BRANCH: ${{ inputs.target_branch }}
+          REQUESTED_BRANCH: \${{ inputs.target_branch }}
+          CREATE_REPOSITORY: \${{ inputs.create_repository }}
           GH_TOKEN: ${{ secrets.AGENT_GITHUB_TOKEN }}
         run: |
           set -euo pipefail
@@ -95,6 +101,18 @@ jobs:
           UPSTREAM_OWNER=${TARGET_REPO%%/*}
           REPO_NAME=${TARGET_REPO#*/}
           test -n "$UPSTREAM_OWNER" && test -n "$REPO_NAME"
+          if ! gh api "repos/$TARGET_REPO" --jq .full_name >/dev/null 2>&1; then
+            if [ "$CREATE_REPOSITORY" != "true" ]; then
+              echo "target repository does not exist; set create_repository=true to allow creation"
+              exit 1
+            fi
+            if [ "$AGENT_OWNER" != "$UPSTREAM_OWNER" ]; then
+              echo "automatic repository creation is limited to the authenticated owner"
+              exit 1
+            fi
+            echo "STAGE=REPOSITORY_CREATION"
+            gh api --method POST user/repos -f name="$REPO_NAME" -f private=true -f auto_init=true -f description="Repository created by Personal AI Bot"
+          fi
           if [ -n "${REQUESTED_BRANCH:-}" ]; then
             BASE_BRANCH="$REQUESTED_BRANCH"
             gh api "repos/$TARGET_REPO/branches/$BASE_BRANCH" --jq .name >/dev/null
