@@ -7,8 +7,15 @@ test "$(git branch --show-current)" = "$BRANCH" || { echo "STAGE=AGENT_EXECUTION
 
 PROVIDER="${LLM_PROVIDER:-auto}"
 MODEL=""
+ACTIVE_PROVIDER=""
 export OPENAI_API_BASE="" OPENAI_API_KEY=""
-if [ "$PROVIDER" = "openrouter" ] || { [ "$PROVIDER" = "auto" ] && [ -n "${OPENROUTER_API_KEY:-}" ]; }; then
+if [ "$PROVIDER" = "omniroute" ] || { [ "$PROVIDER" = "auto" ] && [ -n "${OMNIROUTE_URL:-}" ] && [ -n "${OMNIROUTE_KEY:-}" ]; }; then
+  test -n "${OMNIROUTE_URL:-}" && test -n "${OMNIROUTE_KEY:-}"
+  export OPENAI_API_BASE="${OMNIROUTE_URL%/}/v1"
+  export OPENAI_API_KEY="$OMNIROUTE_KEY"
+  MODEL="openai/${OMNIROUTE_MODEL:-strong-first}"
+  ACTIVE_PROVIDER="omniroute"
+elif [ "$PROVIDER" = "openrouter" ] || { [ "$PROVIDER" = "auto" ] && [ -n "${OPENROUTER_API_KEY:-}" ]; }; then
   test -n "${OPENROUTER_API_KEY:-}"; export OPENAI_API_BASE="https://openrouter.ai/api/v1"; export OPENAI_API_KEY="$OPENROUTER_API_KEY"
   MODEL="openai/${OPENROUTER_MODEL:-openrouter/free}"; ACTIVE_PROVIDER="openrouter"
 elif [ "$PROVIDER" = "deepseek" ] || { [ "$PROVIDER" = "auto" ] && [ -n "${DEEPSEEK_API_KEY:-}" ]; }; then
