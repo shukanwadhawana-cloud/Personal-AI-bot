@@ -8,16 +8,56 @@ test "$(git branch --show-current)" = "$BRANCH" || { echo "STAGE=AGENT_EXECUTION
 PROVIDER="${LLM_PROVIDER:-auto}"
 MODEL=""
 export OPENAI_API_BASE="" OPENAI_API_KEY=""
-if [ "$PROVIDER" = "openrouter" ] || { [ "$PROVIDER" = "auto" ] && [ -n "${OPENROUTER_API_KEY:-}" ]; }; then
-  test -n "${OPENROUTER_API_KEY:-}"; export OPENAI_API_BASE="https://openrouter.ai/api/v1"; export OPENAI_API_KEY="$OPENROUTER_API_KEY"
-  MODEL="openai/${OPENROUTER_MODEL:-openrouter/free}"; ACTIVE_PROVIDER="openrouter"
-elif [ "$PROVIDER" = "deepseek" ] || { [ "$PROVIDER" = "auto" ] && [ -n "${DEEPSEEK_API_KEY:-}" ]; }; then
-  test -n "${DEEPSEEK_API_KEY:-}"; export OPENAI_API_BASE="https://api.deepseek.com"; export OPENAI_API_KEY="$DEEPSEEK_API_KEY"
-  MODEL="openai/${DEEPSEEK_MODEL:-deepseek-flash}"; ACTIVE_PROVIDER="deepseek"
-elif [ "$PROVIDER" = "gemini" ] || [ "$PROVIDER" = "auto" ]; then
-  test -n "${GEMINI_API_KEY:-}"; unset OPENAI_API_BASE OPENAI_API_KEY
-  MODEL="gemini/gemini-3.6-flash"; ACTIVE_PROVIDER="gemini"
-else echo "STAGE=AGENT_EXECUTION failed provider"; exit 1; fi
+
+auth_probe() {
+  local provider="$1" http
+  case "$provider" in
+    openrouter) http=$(curl -sS --connect-timeout 8 --max-time 15 -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${OPENROUTER_API_KEY}" "https://openrouter.ai/api/v1/models" || true) ;;
+    deepseek) http=$(curl -sS --connect-timeout 8 --max-time 15 -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${DEEPSEEK_API_KEY}" "https://api.deepseek.com/models" || true) ;;
+    gemini) http=$(curl -sS --connect-timeout 8 --max-time 15 -o /dev/null -w "%{http_code}" "https://generativelanguage.googleapis.com/v1beta/models?key=${GEMINI_API_KEY}" || true) ;;
+    *) return 1 ;;
+  esac
+  echo "auth_probe provider=$provider http=${http:-000}"
+  [ "$http" = "200" ]
+}
+
+select_provider() {
+  case "$PROVIDER" in
+    openrouter)
+      test -n "${OPENROUTER_API_KEY:-}" || { echo "STAGE=AGENT_EXECUTION failed: OPENROUTER_API_KEY missing"; return 1; }
+      auth_probe openrouter || { echo "STAGE=AGENT_EXECUTION failed: OpenRouter authentication rejected"; return 1; }
+      export OPENAI_API_BASE="https://openrouter.ai/api/v1" OPENAI_API_KEY="$OPENROUTER_API_KEY"
+      MODEL="openai/${OPENROUTER_MODEL:-openrouter/free}"; ACTIVE_PROVIDER="openrouter" ;;
+    deepseek)
+      test -n "${DEEPSEEK_API_KEY:-}" || { echo "STAGE=AGENT_EXECUTION failed: DEEPSEEK_API_KEY missing"; return 1; }
+      auth_probe deepseek || { echo "STAGE=AGENT_EXECUTION failed: DeepSeek authentication rejected"; return 1; }
+      export OPENAI_API_BASE="https://api.deepseek.com" OPENAI_API_KEY="$DEEPSEEK_API_KEY"
+      MODEL="openai/${DEEPSEEK_MODEL:-deepseek-flash}"; ACTIVE_PROVIDER="deepseek" ;;
+    gemini)
+      test -n "${GEMINI_API_KEY:-}" || { echo "STAGE=AGENT_EXECUTION failed: LLM_API_KEY missing"; return 1; }
+      auth_probe gemini || { echo "STAGE=AGENT_EXECUTION failed: Gemini authentication rejected"; return 1; }
+      unset OPENAI_API_BASE OPENAI_API_KEY
+      MODEL="gemini/gemini-3.6-flash"; ACTIVE_PROVIDER="gemini" ;;
+    auto)
+      if [ -n "${OPENROUTER_API_KEY:-}" ] && auth_probe openrouter; then
+        export OPENAI_API_BASE="https://openrouter.ai/api/v1" OPENAI_API_KEY="$OPENROUTER_API_KEY"
+        MODEL="openai/${OPENROUTER_MODEL:-openrouter/free}"; ACTIVE_PROVIDER="openrouter"; return 0
+      fi
+      if [ -n "${DEEPSEEK_API_KEY:-}" ] && auth_probe deepseek; then
+        export OPENAI_API_BASE="https://api.deepseek.com" OPENAI_API_KEY="$DEEPSEEK_API_KEY"
+        MODEL="openai/${DEEPSEEK_MODEL:-deepseek-flash}"; ACTIVE_PROVIDER="deepseek"; return 0
+      fi
+      if [ -n "${GEMINI_API_KEY:-}" ] && auth_probe gemini; then
+        unset OPENAI_API_BASE OPENAI_API_KEY
+        MODEL="gemini/gemini-3.6-flash"; ACTIVE_PROVIDER="gemini"; return 0
+      fi
+      echo "STAGE=AGENT_EXECUTION failed: no configured provider passed authentication"
+      return 1 ;;
+    *) echo "STAGE=AGENT_EXECUTION failed provider=$PROVIDER"; return 1 ;;
+  esac
+}
+
+select_provider
 echo "provider=$ACTIVE_PROVIDER model=$MODEL branch=$(git branch --show-current) HEAD=$(git rev-parse HEAD) baseline=$BASELINE_SHA"
 
 CONTEXT_SCRIPT="/tmp/pai-context-select.py"
