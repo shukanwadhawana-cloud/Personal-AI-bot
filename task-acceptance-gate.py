@@ -1,4 +1,5 @@
 # Autonomous agent validation test — no runtime behavior change
+# Autonomous agent validation test — no runtime behavior change
 #!/usr/bin/env python3
 """Task output acceptance gate.
 
@@ -162,7 +163,7 @@ def looks_like_url(token: str) -> bool:
 def normalize_path(token: str) -> str:
     t = token.strip().strip("`\"'").strip()
     t = t.strip(".",).strip()
-    t = re.sub(r"[,:;]+$", "", t)
+    t = re.sub(r"[,:;]+$", "", "")
     return t.replace("\\", "/")
 
 
