@@ -236,67 +236,7 @@ for attempt in 1 2 3; do
 done
 test "$verified" -eq 1 || { echo "STAGE=VERIFICATION failed"; exit 1; }
 
-PY_CHANGED=$(git diff --name-only "$BASELINE_SHA" | grep -E '\\.pyif git show "$BASELINE_SHA:package-lock.json" >/dev/null 2>&1; then :; else rm -f package-lock.json 2>/dev/null || true; fi
-
-if ! printf '%s' "$TASK_PROMPT" | grep -qiE '\.gitignore'; then
-  if git diff --name-only "$BASELINE_SHA" | grep -qx '.gitignore' \
-    || git ls-files --others --exclude-standard | grep -qx '.gitignore'; then
-    echo "Discarding unsolicited .gitignore change"
-    git checkout "$BASELINE_SHA" -- .gitignore 2>/dev/null || rm -f .gitignore 2>/dev/null || true
-  fi
-fi
-
-PROOF_PATH="docs/personal-ai-bot-e2e-proof.md"
-need_proof=0
-if printf '%s' "$TASK_PROMPT" | grep -q 'personal-ai-bot-e2e-proof'; then need_proof=1; fi
-if [ -f "$PROOF_PATH" ]; then need_proof=1; fi
-if [ "$need_proof" -eq 1 ]; then
-  mkdir -p docs
-  cat > "$PROOF_PATH" <<PROOF_EOF
-# Personal AI Bot E2E proof (worker-authored)
-
-PERSONAL_AI_BOT_E2E_PROOF=PASS
-task_id=${TASK_ID}
-upstream_repo=${UPSTREAM_REPO:-}
-writable_repo=${WRITABLE_REPO:-}
-agent_branch=${BRANCH}
-target_base_branch=${BASE_BRANCH:-}
-baseline_sha=${BASELINE_SHA}
-final_commit_sha=PENDING_COMMIT
-acceptance=PASS
-verification=PASS
-verification_note=${VERIFY_NOTE}
-worker_note=Runtime metadata written by PAI worker after acceptance and verification. Not model-invented.
-PROOF_EOF
-fi
-
-echo "STAGE=COMMIT"
-test "$(git branch --show-current)" = "$BRANCH"
-git add -A
-git reset HEAD -- node_modules .next dist build .aider* 2>/dev/null || true
-if git diff --cached --quiet; then
-  test "$(git rev-parse HEAD)" != "$BASELINE_SHA" || { echo "STAGE=COMMIT failed: no changes"; echo "has_changes=false" >> "$GITHUB_OUTPUT"; exit 1; }
-else
-  git commit -m "agent(${TASK_ID}): automated changes"
-fi
-COMMIT_SHA=$(git rev-parse HEAD)
-
-if [ "$need_proof" -eq 1 ] && [ -f "$PROOF_PATH" ]; then
-  sed -i "s/^final_commit_sha=.*/final_commit_sha=${COMMIT_SHA}/" "$PROOF_PATH"
-  git add "$PROOF_PATH"
-  if ! git diff --cached --quiet; then
-    git commit -m "agent(${TASK_ID}): worker e2e proof metadata"
-    COMMIT_SHA=$(git rev-parse HEAD)
-  fi
-fi
-
-test "$(git branch --show-current)" = "$BRANCH"
-echo "STAGE=PUSH branch=$BRANCH commit=$COMMIT_SHA"
-git push -u origin "refs/heads/${BRANCH}:refs/heads/${BRANCH}"
-echo "has_changes=true" >> "$GITHUB_OUTPUT"
-echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
-echo "commit=$COMMIT_SHA" >> "$GITHUB_OUTPUT"
- || true)
+PY_CHANGED=$(git diff --name-only "$BASELINE_SHA" | grep -E '\.py$' || true)
 if [ -n "$PY_CHANGED" ]; then
   echo "STAGE=PYTHON_VALIDATION"
   while IFS= read -r pyfile; do
@@ -306,11 +246,10 @@ if [ -n "$PY_CHANGED" ]; then
 fi
 
 rm -rf node_modules .next dist build .aider* 2>/dev/null || true
-if git show "$BASELINE_SHA:package-lock.json" >/dev/null 2>&1; then :; else rm -f package-lock.json 2>/dev/null || true; fi
+if ! git show "$BASELINE_SHA:package-lock.json" >/dev/null 2>&1; then rm -f package-lock.json 2>/dev/null || true; fi
 
 if ! printf '%s' "$TASK_PROMPT" | grep -qiE '\.gitignore'; then
-  if git diff --name-only "$BASELINE_SHA" | grep -qx '.gitignore' \
-    || git ls-files --others --exclude-standard | grep -qx '.gitignore'; then
+  if git diff --name-only "$BASELINE_SHA" | grep -qx '.gitignore' || git ls-files --others --exclude-standard | grep -qx '.gitignore'; then
     echo "Discarding unsolicited .gitignore change"
     git checkout "$BASELINE_SHA" -- .gitignore 2>/dev/null || rm -f .gitignore 2>/dev/null || true
   fi
